@@ -63,6 +63,12 @@ jobs:
           $out = "Bin/x64/Release"
           if (-not (Test-Path "$out/HardwareMonitor.dll")) { throw "HardwareMonitor.dll not produced at $out" }
           Get-ChildItem $out -File | Sort-Object Name | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+          Write-Host "--- 中文资源附属程序集 ---"
+          if (Test-Path "$out/zh-CN/HardwareMonitor.resources.dll") {
+            Get-ChildItem "$out/zh-CN" -File | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+          } else {
+            Write-Host "WARN: zh-CN/HardwareMonitor.resources.dll 未生成，中文界面会回退到英文资源"
+          }
           Write-Host "--- utilities.lib ---"
           Get-ChildItem "lib/x64/Release" -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize | Out-String | Write-Host
 
@@ -95,5 +101,8 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: HardwareMonitor_x64_Release
-          path: Bin/x64/Release/HardwareMonitor.dll
-          if-no-files-found: error
+          # 主程序集 + 中文资源附属程序集，两者都要，否则中文界面会缺新加的 Timing 词条
+          path: |
+            Bin/x64/Release/HardwareMonitor.dll
+            Bin/x64/Release/zh-CN/HardwareMonitor.resources.dll
+          if-no-files-found: warn
