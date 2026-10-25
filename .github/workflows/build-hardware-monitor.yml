@@ -6,7 +6,9 @@ name: Build HardwareMonitor plugin (x64)
 on:
   workflow_dispatch:
   push:
-    tags: ['hwmon-*']
+    tags:
+      - 'hwmon-*'              # 临时验证构建
+      - 'HardwareMonitor_V*'   # 正式发布构建，产物直接用于 Release 附件
 
 jobs:
   build_hardware_monitor:
