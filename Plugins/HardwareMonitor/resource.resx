@@ -235,6 +235,9 @@
   <data name="TimeSpan" xml:space="preserve">
     <value>TimeSpan</value>
   </data>
+  <data name="Timing" xml:space="preserve">
+    <value>Timing</value>
+  </data>
   <data name="Voltage" xml:space="preserve">
     <value>Voltage</value>
   </data>

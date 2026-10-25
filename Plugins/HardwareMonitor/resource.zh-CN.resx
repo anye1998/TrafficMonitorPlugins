@@ -196,6 +196,9 @@
   <data name="TimeSpan" xml:space="preserve">
     <value>时间</value>
   </data>
+  <data name="Timing" xml:space="preserve">
+    <value>时序</value>
+  </data>
   <data name="Voltage" xml:space="preserve">
     <value>电压</value>
   </data>

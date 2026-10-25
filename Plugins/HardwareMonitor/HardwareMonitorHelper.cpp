@@ -30,6 +30,7 @@ namespace HardwareMonitor
         case SensorType::SmallData: return MonitorGlobal::Instance()->GetString(L"Data");
         case SensorType::Throughput: return MonitorGlobal::Instance()->GetString(L"Throughput");
         case SensorType::TimeSpan: return MonitorGlobal::Instance()->GetString(L"TimeSpan");
+        case SensorType::Timing: return MonitorGlobal::Instance()->GetString(L"Timing");   //0.9.6 新增
         case SensorType::Energy: return MonitorGlobal::Instance()->GetString(L"Energy");
         case SensorType::Noise: return MonitorGlobal::Instance()->GetString(L"Noise");
         case SensorType::Conductivity: return MonitorGlobal::Instance()->GetString(L"Conductivity");
@@ -48,6 +49,8 @@ namespace HardwareMonitor
         case HardwareType::EmbeddedController: return L"FanColtroller";
         case HardwareType::Network: return L"Network";
         case HardwareType::Memory: return L"RAM";
+        case HardwareType::SuperIO: return L"MotherBoard";      //Super I/O 芯片，归到主板图标
+        case HardwareType::Cooler: return L"FanColtroller";     //水冷水泵/风扇控制器
         case HardwareType::Storage: return L"Storage";
         case HardwareType::GpuAmd: return L"AMD";
         case HardwareType::GpuIntel: return L"intel";
@@ -77,6 +80,7 @@ namespace HardwareMonitor
         case SensorType::SmallData: unitList->Add("MB"); unitList->Add("GB"); break;
         case SensorType::Throughput: unitList->Add("KB/s"); unitList->Add("MB/s"); break;
         case SensorType::TimeSpan: unitList->Add("s"); break;
+        case SensorType::Timing: unitList->Add("ns"); break;   //0.9.6 新增
         case SensorType::Energy: unitList->Add("mWh"); unitList->Add("Wh"); break;
         case SensorType::Noise: unitList->Add("dBA"); break;
         case SensorType::Conductivity: unitList->Add(L"µS/cm"); break;

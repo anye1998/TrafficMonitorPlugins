@@ -1,0 +1,99 @@
+name: Build HardwareMonitor plugin (x64)
+
+# 只编 HardwareMonitor 插件（及其依赖的 utilities 静态库），产出 x64 Release 的 HardwareMonitor.dll。
+# 上游仓库没有 CI，这个工作流是本 Fork 新增的，用于：(1) 验证换用新版
+# LibreHardwareMonitorLib 后源码仍可编译；(2) 提供可直接替换的插件二进制。
+on:
+  workflow_dispatch:
+  push:
+    tags: ['hwmon-*']
+
+jobs:
+  build_hardware_monitor:
+    # 固定 windows-2022（VS2022 + v143）：windows-latest 已指向 VS2026 镜像，默认工具集变成 v144，
+    # 与本工程的 PlatformToolset=v143 不一致。
+    runs-on: windows-2022
+    name: HardwareMonitor.dll (Release x64)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      # 本工程需要三样 hosted runner 默认不装的东西：
+      #   MFC       —— app.rc 里 #include "afxres.h"
+      #   C++/CLI   —— HardwareMonitor.vcxproj 是 CLRSupport=true（/clr），要引用 LibreHardwareMonitorLib
+      #   .NET Framework 4.7.2 目标包 —— TargetFrameworkVersion=v4.7.2
+      - name: Ensure MFC / C++/CLI / .NET Framework 4.7.2
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { throw "vswhere not found" }
+
+          $needMfc   = -not (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.ATLMFC -property installationPath)
+          $needCli   = -not (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.CLI.Support -property installationPath)
+          $needNetFx = -not (& $vswhere -latest -products * -requires Microsoft.Net.Component.4.7.2.TargetingPack -property installationPath)
+          Write-Host "need MFC: $needMfc ; need C++/CLI: $needCli ; need .NET 4.7.2 pack: $needNetFx"
+
+          if ($needMfc -or $needCli -or $needNetFx) {
+            $installPath = & $vswhere -latest -products * -property installationPath
+            Write-Host "VS: $installPath"
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+            $vsArgs = @('modify', '--installPath', "`"$installPath`"", '--quiet', '--norestart', '--nocache')
+            if ($needMfc)   { $vsArgs += @('--add', 'Microsoft.VisualStudio.Component.VC.ATLMFC') }
+            if ($needCli)   { $vsArgs += @('--add', 'Microsoft.VisualStudio.Component.VC.CLI.Support') }
+            if ($needNetFx) { $vsArgs += @('--add', 'Microsoft.Net.Component.4.7.2.TargetingPack') }
+            Write-Host "running: vs_installer $($vsArgs -join ' ')"
+            $p = Start-Process -FilePath $installer -ArgumentList $vsArgs -Wait -NoNewWindow -PassThru
+            Write-Host "vs_installer exit code: $($p.ExitCode)"
+          }
+
+      - name: Build utilities static library (Release x64)
+        # HardwareMonitor 链接 utilities.lib，但它没有 ProjectReference，
+        # 所以必须显式先编一次，产物落在 lib\x64\Release（由工程里的 LibraryPath 提供搜索路径）。
+        run: msbuild TrafficMonitorPlugins.sln -t:utilities -m -p:configuration=Release -p:platform=x64 -p:platformToolset=v143 -verbosity:minimal
+
+      - name: Build HardwareMonitor plugin (Release x64)
+        run: msbuild TrafficMonitorPlugins.sln -t:HardwareMonitor -m -p:configuration=Release -p:platform=x64 -p:platformToolset=v143 -verbosity:minimal
+
+      - name: Show output
+        shell: pwsh
+        run: |
+          $out = "Bin/x64/Release"
+          if (-not (Test-Path "$out/HardwareMonitor.dll")) { throw "HardwareMonitor.dll not produced at $out" }
+          Get-ChildItem $out -File | Sort-Object Name | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+          Write-Host "--- utilities.lib ---"
+          Get-ChildItem "lib/x64/Release" -ErrorAction SilentlyContinue | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+
+      - name: Sanity checks
+        shell: pwsh
+        run: |
+          $err = 0
+          $dll = "Bin/x64/Release/HardwareMonitor.dll"
+          $b = [System.IO.File]::ReadAllBytes($dll)
+
+          # 1) 插件必须引用新版 LibreHardwareMonitorLib（不能是内嵌 WinRing0 的 0.9.4）
+          $ascii = [System.Text.Encoding]::ASCII.GetString($b)
+          if ($ascii.Contains('LibreHardwareMonitor')) { Write-Host "OK: references LibreHardwareMonitor" }
+          else { Write-Host "FAIL: no LibreHardwareMonitor reference"; $err++ }
+
+          # 2) 工程里随源码一起带的 LHM 必须是 0.9.6 且不含 WinRing0
+          $lhm = "Plugins/HardwareMonitor/LibreHardwareMonitorLib.dll"
+          $lhmText = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($lhm))
+          if ($lhmText.Contains('WinRing0')) { Write-Host "FAIL: bundled LHM contains WinRing0"; $err++ }
+          else { Write-Host "OK: bundled LHM has no WinRing0" }
+          if ($lhmText.Contains('PawnIO')) { Write-Host "OK: bundled LHM uses PawnIO backend" }
+          else { Write-Host "FAIL: bundled LHM has no PawnIO backend"; $err++ }
+          $ver = [System.Reflection.AssemblyName]::GetAssemblyName((Resolve-Path $lhm)).Version.ToString()
+          if ($ver -eq '0.9.6.0') { Write-Host "OK: bundled LHM assembly version $ver" }
+          else { Write-Host "FAIL: bundled LHM version $ver (expected 0.9.6.0)"; $err++ }
+
+          if ($err -ne 0) { throw "$err sanity check(s) failed" }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HardwareMonitor_x64_Release
+          path: Bin/x64/Release/HardwareMonitor.dll
+          if-no-files-found: error
