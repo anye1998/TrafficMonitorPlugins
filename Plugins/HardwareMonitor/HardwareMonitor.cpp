@@ -306,7 +306,7 @@ namespace HardwareMonitor
             return L"https://github.com/zhongyang219/TrafficMonitorPlugins";
             break;
         case TMI_VERSION:
-            return L"1.0.1";
+            return L"1.0.2";
         default:
             break;
         }

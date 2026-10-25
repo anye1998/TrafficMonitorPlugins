@@ -65,7 +65,9 @@
 | `Plugins/HardwareMonitor/HardwareMonitorHelper.cpp` | 补上 0.9.6 新增的枚举：`SensorType::Timing`（单位 `ns`）、`HardwareType::SuperIO`（归到主板图标）、`HardwareType::Cooler`（归到风扇控制器图标）。缺这三个 case 时对应传感器的名称会显示为空白。 |
 | `Plugins/HardwareMonitor/resource.resx` | 新增 `Timing` 显示名。 |
 | `Plugins/HardwareMonitor/resource.zh-CN.resx` | 新增 `Timing` 中文名（`时序`）。 |
-| `Plugins/HardwareMonitor/app.rc` | 版本号 `1.0.1.1` → **`1.0.2.0`**，便于和上游 V1.0.1 的构建区分。 |
+| `Plugins/HardwareMonitor/app.rc` | 版本号 `1.0.1.1` → **`1.0.2.0`**（文件属性里的版本），便于和上游 V1.0.1 的构建区分。 |
+| `Plugins/HardwareMonitor/HardwareMonitor.cpp` | `GetInfo(TMI_VERSION)` 返回值 `1.0.1` → **`1.0.2`**。这个字符串才是 TrafficMonitor「插件管理」界面显示的版本，和 `app.rc` 里的文件版本是两套，必须同步改。 |
+| `plugins_version.xml` | `HardwareMonitor.dll` 的版本 `1.00` → **`1.02`**，用于主程序检查插件更新。 |
 | `.github/workflows/build-hardware-monitor.yml`（新增） | 上游没有 CI。该工作流用 `windows-2022` + VS2022（v143），先编 `utilities` 静态库再编 `HardwareMonitor`；编译前按需补装 MFC（`app.rc` 需要 `afxres.h`）、C++/CLI 与 .NET Framework 4.7.2 目标包；上传前校验随源码带的 LHM 必须无 WinRing0、有 PawnIO、程序集版本为 `0.9.6.0`。 |
 | `tools/privilege/`（新增） | 「插件必须管理员才能看温度」的实测分析，以及「静默以管理员启动、不弹 UAC」的安装/卸载脚本。详见 [`tools/privilege/README.md`](./tools/privilege/README.md)。 |
 

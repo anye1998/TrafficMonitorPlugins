@@ -95,6 +95,15 @@ jobs:
           if ($ver -eq '0.9.6.0') { Write-Host "OK: bundled LHM assembly version $ver" }
           else { Write-Host "FAIL: bundled LHM version $ver (expected 0.9.6.0)"; $err++ }
 
+          # 3) 界面显示的版本号（GetInfo(TMI_VERSION)）与文件版本必须同步，
+          #    否则「插件管理」里仍显示旧版本号（两套版本号，容易漏改）
+          $uni = [System.Text.Encoding]::Unicode.GetString($b)
+          if ($uni.Contains('1.0.2')) { Write-Host "OK: TMI_VERSION reported as 1.0.2" }
+          else { Write-Host "FAIL: TMI_VERSION is not 1.0.2 (plugin manager would show an old version)"; $err++ }
+          $fv = (Get-Item $dll).VersionInfo.FileVersion
+          if ($fv -like '1.0.2*') { Write-Host "OK: file version $fv" }
+          else { Write-Host "FAIL: file version $fv (expected 1.0.2.0)"; $err++ }
+
           if ($err -ne 0) { throw "$err sanity check(s) failed" }
 
       - name: Upload artifact
