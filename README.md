@@ -11,6 +11,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
+> - **下载编译好的插件：[HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
 
 ## 插件下载
