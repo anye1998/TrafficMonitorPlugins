@@ -51,6 +51,10 @@ public:
     // 立刻执行一次全量枚举并把结果写进诊断日志（初始化时调用一次）
     void DumpDiagnosticsOnce();
 
+    // 当前生效的采集周期（毫秒），供设置窗口展示。
+    // 来源：MouseStatus.ini 的 [config] refresh_interval_ms，缺省 1000ms。
+    static int LoopPeriodMs();
+
 private:
     CMouseMonitor();
     ~CMouseMonitor();

@@ -122,6 +122,34 @@ void WriteIniEnabled(DiagState& st, bool value)
     ::WritePrivateProfileStringW(kIniSection, kIniKeyEnableLog, value ? L"1" : L"0", ini.c_str());
 }
 
+int GetConfigInt(const wchar_t* key, int default_value, int min_value, int max_value)
+{
+    if (key == nullptr)
+        return default_value;
+
+    const std::wstring ini = ResolveIniPath(State());
+    if (ini.empty())
+        return default_value;
+
+    wchar_t buf[32] = { 0 };
+    const DWORD got = ::GetPrivateProfileStringW(kIniSection, key, L"",
+        buf, (DWORD)(sizeof(buf) / sizeof(buf[0])), ini.c_str());
+    if (got == 0 || buf[0] == L'\0')
+        return default_value;
+
+    // 只接受纯数字，避免 ini 里写成 "1s" / "1000ms" 这类时静默取到 1
+    for (const wchar_t* p = buf; *p != L'\0'; ++p)
+    {
+        if (*p < L'0' || *p > L'9')
+            return default_value;
+    }
+
+    const long value = ::wcstol(buf, nullptr, 10);
+    if (value < min_value || value > max_value)
+        return default_value;
+    return (int)value;
+}
+
 // v1.0.5 及更早版本把开关存在注册表里。这里做一次性迁移：
 //   1) ini 还没有该键时，把注册表的旧值搬过来，避免升级后设置丢失；
 //   2) 删掉整个 HKCU\Software\MouseStatus —— 插件之后只在 ini 里存配置。

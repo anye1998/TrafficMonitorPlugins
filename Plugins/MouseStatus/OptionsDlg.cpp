@@ -68,7 +68,12 @@ void RefreshSizeLabel(OptionsUi* ui)
 {
     if (ui == nullptr || ui->static_size == nullptr)
         return;
-    const std::wstring text = L"当前日志大小：" + FormatSize(diag::LogFileSize());
+    std::wstring text = L"当前日志大小：" + FormatSize(diag::LogFileSize());
+    // 顺带把采集周期显示出来：这个值决定「最近检查」多久跳一次，
+    // 用户可以按主程序的「监控时间间隔」在 ini 里对齐它。
+    wchar_t buf[64] = { 0 };
+    ::swprintf_s(buf, L"　｜　采集周期：%d ms", CMouseMonitor::LoopPeriodMs());
+    text += buf;
     ::SetWindowTextW(ui->static_size, text.c_str());
 }
 
@@ -108,7 +113,7 @@ void CreateChildren(OptionsUi* ui)
     RefreshSizeLabel(ui);
 
     // 配置文件（ini）—— 和 Battery / DateTime 等插件放在同一个目录
-    MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关保存在这里）：", SS_LEFT, 0,
+    MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关与采集周期保存在这里）：", SS_LEFT, 0,
         16, 142, inner, 16, -1);
     ui->edit_ini = MakeChild(ui, L"EDIT", diag::ConfigFilePath().c_str(),
         ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 160, inner, 24, IDC_EDIT_INI);

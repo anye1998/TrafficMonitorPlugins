@@ -35,6 +35,10 @@ bool Enabled();
 // 修改日志开关，并写入 ini 持久化
 void SetEnabled(bool enabled);
 
+// 读 ini 里 [config] 段的整数项；不存在或超出范围时返回 default_value。
+// 插件自己不写这些键，留给用户手工编辑 ini 调整行为。
+int GetConfigInt(const wchar_t* key, int default_value, int min_value, int max_value);
+
 // 删除 MouseStatus.log 与 MouseStatus.log.old，返回是否全部删干净
 bool DeleteLogFiles();
 

@@ -23,8 +23,21 @@ constexpr ULONGLONG kProbeIntervalMs = 3000;     // 无上报时活性探测的�
 constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔
 constexpr ULONGLONG kHidRescanMs = 8000;         // 通用 HID 候选重新枚举的间隔
 constexpr ULONGLONG kBluetoothRescanMs = 15000;  // 蓝牙电量属性重新查询的间隔
-constexpr DWORD kIdleSleepMs = 400;              // 主循环间隔
 constexpr ULONGLONG kStaleThresholdMs = 8000;    // 无主动探测能力时的「过期」阈值
+
+// 主循环周期。默认与 TrafficMonitor 的采集间隔（general.monitor_time_span，默认 1000）对齐：
+// 主程序要等 DataRequired 被调用才会来取一次数据、状态栏窗口也是 1000ms 重绘一次，
+// 采样比这更快不会让界面更及时，只是白白多耗唤醒。用户把主程序间隔调过（200~30000ms）时，
+// 可以手工在 MouseStatus.ini 里写 refresh_interval_ms 覆盖。
+constexpr int kDefaultLoopPeriodMs = 1000;
+constexpr int kMinLoopPeriodMs = 200;
+constexpr int kMaxLoopPeriodMs = 30000;
+
+int ResolveLoopPeriodMs()
+{
+    return diag::GetConfigInt(L"refresh_interval_ms", kDefaultLoopPeriodMs, kMinLoopPeriodMs,
+        kMaxLoopPeriodMs);
+}
 
 std::wstring NowTimeText()
 {
@@ -227,6 +240,11 @@ DWORD WINAPI CMouseMonitor::ThreadProc(LPVOID param)
     return 0;
 }
 
+int CMouseMonitor::LoopPeriodMs()
+{
+    return ResolveLoopPeriodMs();
+}
+
 void CMouseMonitor::Run()
 {
 #ifdef _WIN64
@@ -238,23 +256,36 @@ void CMouseMonitor::Run()
 
     DumpDiagnosticsOnce();
 
+    const int period_ms = ResolveLoopPeriodMs();
+    diag::Log(L"采集周期：%d ms（ini 键 refresh_interval_ms，默认 %d）", period_ms,
+        kDefaultLoopPeriodMs);
+
     while (::WaitForSingleObject(m_stop, 0) == WAIT_TIMEOUT)
     {
+        const ULONGLONG round_begin = ::GetTickCount64();
+
         // 三个数据源每轮都跑，谁有电量用谁；不再「先到先得」短路后备链路
         const SourceResult rapoo = PollRapoo();
         const SourceResult hid = PollHidBattery();
         const SourceResult bt = PollBluetooth();
         Compose(rapoo, hid, bt);
 
-        if (::WaitForSingleObject(m_stop, kIdleSleepMs) == WAIT_OBJECT_0)
+        // 睡到下一个整周期，而不是「干完活再固定睡一段」：
+        // 雷柏在线时本轮要花一两百毫秒等报文，若再叠加固定睡眠，实际周期会漂到 1.2~1.6 秒，
+        // 与主程序的 1 秒采集错拍，表现为电量偶尔「跳一格又停两秒」。
+        const ULONGLONG spent = ::GetTickCount64() - round_begin;
+        DWORD sleep_ms = 100;   // 兜底：本轮超时就不额外睡，留一点余量避免空转
+        if (spent + 100 < (ULONGLONG)period_ms)
+            sleep_ms = (DWORD)((ULONGLONG)period_ms - spent);
+
+        if (::WaitForSingleObject(m_stop, sleep_ms) == WAIT_OBJECT_0)
             break;
     }
 
     diag::Log(L"=== MouseStatus 停止 ===");
 }
 
-// 把三个源合成为一个快照：优先采用「拿到电量」的源，其次采用「仅确认在线」的源
-void CMouseMonitor::Compose(const SourceResult& rapoo, const SourceResult& hid,
+// 把三个源合成为一个快照：优先采用「拿到电量」的源，其次采用「仅确认在线」的源void CMouseMonitor::Compose(const SourceResult& rapoo, const SourceResult& hid,
     const SourceResult& bt)
 {
     const SourceResult* const order[3] = { &rapoo, &hid, &bt };
@@ -622,9 +653,13 @@ bool CMouseMonitor::ReadRapooReports(int budget_ms)
             const BOOL ok = ::ReadFile(m_h_status, m_read_buf, (DWORD)report_len, &bytes, &m_ov);
             if (ok)
             {
+                // 同步完成：说明驱动里已经排着报文
                 if (bytes > 0 && ApplyRapooReport(bytes))
+                {
                     got = true;
-                continue;   // 同步完成，立刻再发一帧
+                    break;      // 本轮已拿到一帧，剩下的时间留给另外两个数据源与睡眠
+                }
+                continue;       // 无法解析的帧，接着要下一帧
             }
 
             const DWORD err = ::GetLastError();
@@ -652,7 +687,10 @@ bool CMouseMonitor::ReadRapooReports(int budget_ms)
             }
             m_status_read_pending = false;
             if (bytes > 0 && ApplyRapooReport(bytes))
+            {
                 got = true;
+                break;      // 同上：拿到有效帧就收工，别把本轮的预算吃满
+            }
         }
         else if (wait == WAIT_TIMEOUT)
         {
