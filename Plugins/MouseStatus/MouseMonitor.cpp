@@ -1042,9 +1042,17 @@ void CMouseMonitor::Publish(LinkKind link, int battery, DataSource source,
     ::EnterCriticalSection(&m_cs);
     if (battery >= 0)
     {
+        const bool value_changed = (m_snapshot.battery != battery);
+        const std::wstring now_text = NowTimeText();
+
         m_snapshot.battery = battery;
         m_snapshot.battery_is_stale = false;
-        m_snapshot.last_seen = NowTimeText();
+
+        // 每次检查都更新（说明插件还在盯着），但要和「数值变化」区分开：
+        // 蓝牙电量来自系统缓存，值不变是常态，last_seen 必须只在数值真的变了时才动。
+        m_snapshot.last_check = now_text;
+        if (value_changed || m_snapshot.last_seen.empty())
+            m_snapshot.last_seen = now_text;
     }
     else if (m_snapshot.battery >= 0)
     {

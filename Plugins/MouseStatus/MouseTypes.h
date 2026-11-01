@@ -52,5 +52,14 @@ struct MouseSnapshot
     bool live{ false };             // 最近一次探测是否有效（用于判断连接状态）
     DataSource source{ DataSource::None };
     std::wstring device_name;       // 设备名（型号/友好名）
-    std::wstring last_seen;         // 最后一次拿到有效数据的本地时间 HH:MM:SS
+
+    // 两个时间必须分开，否则会误导：
+    //   last_seen  —— 电量**数值最后一次变化**的时刻。它才是这个数字的可信时间，
+    //                 蓝牙电量来自系统缓存，值可能几小时不变，这里就会一直停着。
+    //   last_check —— 插件**最后一次检查**的时刻。主循环约每 400ms 走一轮，
+    //                 所以它基本上一直在跳，只能说明"插件还在盯着"，不代表数据是新的。
+    // 早先只有 last_seen 且每次检查都刷新它，于是鼠标提示里那个时间每秒都在变，
+    // 看起来像"每秒都在重新读电量"，其实只是每秒重新读了一次缓存。
+    std::wstring last_seen;
+    std::wstring last_check;
 };

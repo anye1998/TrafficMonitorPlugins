@@ -130,10 +130,13 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
             text += L"\n上次读数：";
             text += ToWString(state.battery);
             text += L"%";
-            if (!state.last_seen.empty())
+            // 离线后 last_check 就停在最后一次成功检查的时刻，用它更贴近
+            // 「这个读数是什么时候看到的」；没有 last_check 时退回 last_seen。
+            const std::wstring& stamp = state.last_check.empty() ? state.last_seen : state.last_check;
+            if (!stamp.empty())
             {
                 text += L"（";
-                text += state.last_seen;
+                text += stamp;
                 text += L"）";
             }
         }
@@ -172,12 +175,22 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
     {
         // 这条路径读的是 Windows 缓存的设备属性，什么时候刷新由系统决定，
         // 不是插件能控制的，写清楚免得用户以为读数卡住了。
-        text += L"（系统缓存，刷新可能滞后）";
+        text += L"（系统缓存值）";
     }
+
+    // 两个时间分开显示：「读数更新于」是数值真正变化的时刻（数据新鲜度），
+    // 「最近检查」是插件最后一次轮询的时刻（只说明插件还在盯着）。
+    // 之前只显示一个每秒跳动的「更新于」，容易被误认为每秒都在重新读电量。
     if (!state.last_seen.empty())
     {
-        text += L"\n更新于 ";
+        text += L"\n读数更新于 ";
         text += state.last_seen;
+    }
+    if (!state.last_check.empty() && state.last_check != state.last_seen)
+    {
+        text += L"\n最近检查 ";
+        text += state.last_check;
+        text += L"（数值未变）";
     }
 
     if (state.battery < 0)
@@ -204,7 +217,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.9";
+        return L"1.0.10";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:

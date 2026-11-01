@@ -10,8 +10,8 @@ IDI_ICON1               ICON                    "res\\icon.ico"
 // Version
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 1,0,9,0
- PRODUCTVERSION 1,0,9,0
+ FILEVERSION 1,0,10,0
+ PRODUCTVERSION 1,0,10,0
  FILEFLAGSMASK 0x3fL
  FILEFLAGS 0x0L
  FILEOS 0x40004L
@@ -24,12 +24,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "anye1998"
             VALUE "FileDescription", "MouseStatus Plugin for TrafficMonitor"
-            VALUE "FileVersion", "1.0.9.0"
+            VALUE "FileVersion", "1.0.10.0"
             VALUE "InternalName", "MouseStatus"
             VALUE "LegalCopyright", "MIT License"
             VALUE "OriginalFilename", "MouseStatus.dll"
             VALUE "ProductName", "MouseStatus"
-            VALUE "ProductVersion", "1.0.9.0"
+            VALUE "ProductVersion", "1.0.10.0"
         END
     END
     BLOCK "VarFileInfo"
