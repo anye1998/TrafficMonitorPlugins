@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.8](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.8)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.9](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.9)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.8**，
-下载：[MouseStatus V1.0.8](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.8)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.9**，
+下载：[MouseStatus V1.0.9](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.9)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -262,19 +262,40 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 
 ### 已知限制
 
-- 雷柏机型的充电状态是**推导值**，不是硬件标志位：厂商报文中没有公开、可靠的充电位，与其采信
-  含义不明的位（参考项目就是这样产生假阳性的），不如按「有线 + 未满电」推导；满电时显示「已充满」。
+- **蓝牙电量读的是 Windows 缓存值**，不是插件主动去问鼠标。`DEVPKEY_Bluetooth_Battery` 这个属性由
+  系统在收到 GATT 通知时更新，所以电量数字可能在系统刷新前保持不变（鼠标提示里标的「系统缓存，
+  刷新可能滞后」就是这个意思）。想尽快刷新，就点开一次「设置 → 蓝牙和设备」里的该设备。
+- 雷柏机型的充电状态取厂商报文 `buf[7]` 的 bit1（真机对照过：常态 `01` → 插线 `02` → 拔线 `01`），
+  因此「2.4G 连接 + 插着充电线」也能正确显示 `充电中`。该结论来自实测，换型号后若行为不符需重新核对。
 - 有线 / 2.4G 的区分：雷柏靠 PID 前缀（`0x46xx` 为有线）判定；**其它品牌**只能靠「能否上报电量」
   推断，个别支持电量上报的有线鼠标可能被显示为 `2.4G`。
 - 通用路径依赖设备自身暴露 HID 电池用途，或 Windows 已缓存其蓝牙电量；两者都没有的设备会显示 `?`
   （V1.0.0 及更早版本在这种情况下显示 `--`，容易和「没插设备」混淆，所以改了）。
 - 鼠标休眠 / 关机时，电量保留最后一次真实读数，连接方式显示为 `--`（未连接），鼠标提示里会标注读数时间。
 
+### 已实测适配的设备
+
+| 设备 | 连接 | 电量来源 | 充电状态 |
+|---|---|---|---|
+| 雷柏 VT3（`24AE:1412`） | 2.4G | 私有报文 `buf[8]` | 私有报文 `buf[7]` bit1 |
+| HUAWEI Mouse CD20（`12D1:1099`） | 蓝牙 LE | `BTHLE\DEV_*` 节点的蓝牙电量属性 | 无（蓝牙供电，按电量推导） |
+
+后者的日志形态可以作为「蓝牙鼠标读不到电量」的对照样本：蓝牙栈节点里应该能看到
+
+```
+le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
+    id=BTHLE\DEV_D1AA72778ACE\...
+```
+
+注意实例 ID 里的 `DEV_` 是**全大写** —— 早期版本用大小写敏感的 `Dev_` 匹配，一个节点都匹配不上，
+这就是它显示「未检测到鼠标」的直接原因。
+
 ### 版本变更
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.8** | 蓝牙节点枚举补全（支持 `BTHLEDEVICE`、`Dev_` 大小写不敏感）、feature 报文改为按设备采集全部集合（不再只读鼠标集合）；诊断能区分「没扫到蓝牙节点」与「扫到了但没电量」 |
+| **V1.0.9** | 鼠标提示标注蓝牙电量来自「系统缓存值」；README 修正雷柏充电状态说明、补充已实测适配设备（华为 CD20）与蓝牙电量刷新机制 |
+| V1.0.8 | 蓝牙节点枚举补全（支持 `BTHLEDEVICE`、`Dev_` 大小写不敏感）、feature 报文改为按设备采集全部集合（不再只读鼠标集合）；诊断能区分「没扫到蓝牙节点」与「扫到了但没电量」 |
 | V1.0.7 | 修复蓝牙鼠标「检测不到」：在线判定与电量读取解耦，只要枚举到外接鼠标的 HID 集合就算在线（不再要求它暴露标准电池用途）；笔记本内置触摸板按「I2C-HID 无 VID/PID」排除；日志新增鼠标接口小节与蓝牙 feature 报文 dump |
 | V1.0.6 | 设置项改用 `plugins\MouseStatus.ini` 保存（与其它插件统一），不再写注册表；升级时自动迁移旧值并清理注册表残留；设置窗口改为按显示器工作区居中，不再跑到屏幕最下方/屏幕外 |
 | V1.0.5 | 按真机报文解析出充电标志位（`buf[7]` 的 bit1），「2.4G 连接 + 插着充电线」现在能正确显示 `充电中`；断连时清空充电位 |

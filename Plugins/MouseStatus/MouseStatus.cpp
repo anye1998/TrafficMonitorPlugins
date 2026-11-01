@@ -168,6 +168,12 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
 
     text += L"\n数据来源：";
     text += SourceName(state.source);
+    if (state.source == DataSource::BluetoothProp)
+    {
+        // 这条路径读的是 Windows 缓存的设备属性，什么时候刷新由系统决定，
+        // 不是插件能控制的，写清楚免得用户以为读数卡住了。
+        text += L"（系统缓存，刷新可能滞后）";
+    }
     if (!state.last_seen.empty())
     {
         text += L"\n更新于 ";
@@ -198,7 +204,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.8";
+        return L"1.0.9";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:
