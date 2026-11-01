@@ -316,8 +316,9 @@ void CMouseMonitor::DumpDiagnosticsOnce()
     diag::Log(L"  feature=%s", ep.feature_path.c_str());
 
     diag::Log(L"--- 蓝牙设备节点 ---");
-    const std::vector<BtBatteryEntry> bts = QueryBluetoothBatteries();
-    diag::Log(L"在线蓝牙设备节点数：%u（其中带电量属性 %u 个）", (unsigned)bts.size(),
+    unsigned scanned_nodes = 0;
+    const std::vector<BtBatteryEntry> bts = QueryBluetoothBatteries(&scanned_nodes);
+    diag::Log(L"蓝牙栈节点数：%u（带电量属性 %u 个）", scanned_nodes,
         (unsigned)std::count_if(bts.begin(), bts.end(),
             [](const BtBatteryEntry& e) { return e.has_battery; }));
     for (const auto& e : bts)
@@ -326,10 +327,10 @@ void CMouseMonitor::DumpDiagnosticsOnce()
             e.has_battery ? 1 : 0, e.percent, e.is_mouse ? 1 : 0, e.name.c_str());
         diag::Log(L"      id=%s", e.instance_id.c_str());
     }
-    if (bts.empty())
+    if (scanned_nodes == 0)
     {
-        diag::Log(L"  提示：没有枚举到任何在线蓝牙设备节点。若鼠标确实连着，"
-                  L"说明它可能走的是经典蓝牙（BTHENUM）以外的通道，或者已被系统挂起");
+        diag::Log(L"  提示：连一个蓝牙栈节点都没有枚举到。这说明系统里没有 BTHENUM/BTHLE/"
+                  L"BTHLEDEVICE 设备节点，电量不可能从这条路径拿到");
     }
     else
     {
@@ -357,16 +358,30 @@ void CMouseMonitor::DumpDiagnosticsOnce()
 
     // 读一遍 feature 报文：不少蓝牙鼠标把电量放在厂商自定义集合里，
     // 拿到原始字节才能判断到底是哪一段（也方便后续按型号适配）。
+    // 注意要按 device_key 把**同一只鼠标的所有集合**都读一遍 ——
+    // 鼠标集合本身通常 feat=0，真正有自定义通道的是另一个 colNN 集合。
     for (const auto& m : mice)
     {
         if (m.transport != HidTransport::BtLe && m.transport != HidTransport::BtClassic)
             continue;
-        const std::vector<FeatureReportDump> dumps = DumpFeatureReports(m.path);
-        diag::Log(L"蓝牙鼠标 feature 报文：%u 个（transport=%s）", (unsigned)dumps.size(),
-            TransportText(m.transport));
-        for (const auto& d : dumps)
+
+        diag::Log(L"蓝牙鼠标的全部集合（device_key=%s）：", m.device_key.c_str());
+        for (const auto& info : ifaces)
         {
-            diag::LogHex(L"  feature 原始字节:", d.data.data(), (unsigned)d.data.size());
+            if (DeviceKeyOf(info.path) != m.device_key)
+                continue;
+
+            HidProbeResult probe;
+            ProbeHidInterface(info.path, probe);
+            const std::vector<FeatureReportDump> dumps = DumpFeatureReports(info.path);
+
+            diag::Log(L"  usagePage=%04X usage=%04X in=%d out=%d feat=%d → feature 报文 %u 个",
+                (unsigned)probe.usage_page, (unsigned)probe.usage, probe.input_report_len,
+                probe.output_report_len, probe.feature_report_len, (unsigned)dumps.size());
+            for (const auto& d : dumps)
+            {
+                diag::LogHex(L"    feature 原始字节:", d.data.data(), (unsigned)d.data.size());
+            }
         }
     }
 

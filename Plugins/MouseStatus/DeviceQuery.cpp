@@ -54,6 +54,22 @@ std::wstring ToLower(const std::wstring& s)
     return r;
 }
 
+// 大小写不敏感的查找。设备实例 ID 里 "Dev_" 的大小写并不固定
+// （蓝牙 HID 的接口路径里就是小写 _dev_），用 wcsstr 会漏掉。
+size_t FindNoCase(const std::wstring& haystack, const wchar_t* needle)
+{
+    if (needle == nullptr || *needle == L'\0')
+        return std::wstring::npos;
+    const std::wstring lower_hay = ToLower(haystack);
+    const std::wstring lower_needle = ToLower(std::wstring(needle));
+    return lower_hay.find(lower_needle);
+}
+
+bool ContainsNoCase(const std::wstring& haystack, const wchar_t* needle)
+{
+    return FindNoCase(haystack, needle) != std::wstring::npos;
+}
+
 HANDLE OpenHidShared(const std::wstring& path)
 {
     HANDLE h = ::CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
@@ -208,6 +224,23 @@ long ReadNumericProp(const BYTE* value, DWORD size, DEVPROPTYPE type)
 }
 
 } // namespace
+
+std::wstring DeviceKeyOf(const std::wstring& path)
+{
+    const size_t p1 = path.find(L'#');
+    if (p1 == std::wstring::npos)
+        return path;
+
+    const size_t p2 = path.find(L'#', p1 + 1);
+    std::wstring segment = (p2 == std::wstring::npos) ? path.substr(p1 + 1)
+                                                      : path.substr(p1 + 1, p2 - p1 - 1);
+
+    // 去掉 "...&colNN" 后缀，同一个物理设备的所有集合就落到同一个 key 上
+    const size_t col = FindNoCase(segment, L"&col");
+    if (col != std::wstring::npos)
+        segment.erase(col);
+    return segment;
+}
 
 std::vector<HidIfaceInfo> EnumHidInterfaces()
 {
@@ -374,6 +407,8 @@ std::vector<MouseIface> EnumMouseInterfaces()
         MouseIface m;
         m.path = info.path;
         m.product = info.product;
+        m.group = info.group;
+        m.device_key = DeviceKeyOf(info.path);
         m.transport = info.transport;
         m.vid = info.vid;
         m.pid = info.pid;
@@ -485,14 +520,18 @@ bool DevNodeContainsMouse(const std::wstring& instance_id)
     return false;
 }
 
-std::vector<BtBatteryEntry> QueryBluetoothBatteries()
+std::vector<BtBatteryEntry> QueryBluetoothBatteries(unsigned* total_nodes)
 {
     std::vector<BtBatteryEntry> result;
+    if (total_nodes != nullptr)
+        *total_nodes = 0;
 
     HDEVINFO h_dev = ::SetupDiGetClassDevsW(nullptr, nullptr, nullptr,
         DIGCF_ALLCLASSES | DIGCF_PRESENT);
     if (h_dev == INVALID_HANDLE_VALUE)
         return result;
+
+    unsigned scanned = 0;
 
     SP_DEVINFO_DATA did;
     ::ZeroMemory(&did, sizeof(did));
@@ -504,21 +543,30 @@ std::vector<BtBatteryEntry> QueryBluetoothBatteries()
         if (!::SetupDiGetDeviceInstanceIdW(h_dev, &did, id, ARRAYSIZE(id), nullptr))
             continue;
 
+        // 蓝牙栈里的设备节点前缀：
+        //   BTHENUM\       经典蓝牙设备
+        //   BTHLE\         低功耗蓝牙设备（电量属性 DEVPKEY_Bluetooth_Battery 通常挂在这里）
+        //   BTHLEDEVICE\   BLE 的 GATT 服务节点（HID over GATT 等）
+        // 早先只认前两种，且 Dev_ 用大小写敏感匹配 —— 实测某台机器上一个都匹配不上。
         const bool is_bt_classic = (_wcsnicmp(id, L"BTHENUM\\", 8) == 0);
         const bool is_bt_le = (_wcsnicmp(id, L"BTHLE\\", 6) == 0);
-        if (!is_bt_classic && !is_bt_le)
+        const bool is_bt_le_device = (_wcsnicmp(id, L"BTHLEDEVICE\\", 12) == 0);
+        if (!is_bt_classic && !is_bt_le && !is_bt_le_device)
             continue;
+        ++scanned;
 
-        // 只认 Dev_ 开头的节点，它们才代表设备本身；其余是各 Profile 的子节点
-        if (::wcsstr(id, L"Dev_") == nullptr)
-            continue;
+        // "Dev_" 的写法在真实系统里并不统一（蓝牙 HID 的接口路径里就是小写 _dev_），
+        // 这里改成大小写不敏感；非 Dev_ 的 Profile 子节点也保留，
+        // 因为电量属性未必挂在设备节点本身上。
+        const std::wstring instance(id);
+        const bool has_dev_token = ContainsNoCase(instance, L"dev_");
 
         // 注意：这里不再「没有电量属性就跳过」。
         // 没有电量属性本身也是一条重要信息 —— 它说明设备在线、只是 Windows 没缓存电量，
         // 上层据此可以显示「已连接 / 电量未知」，而不是「未检测到鼠标」。
         BtBatteryEntry entry;
         entry.instance_id = id;
-        entry.le = is_bt_le;
+        entry.le = is_bt_le || is_bt_le_device;
         entry.has_battery = false;
         entry.percent = -1;
 
@@ -544,11 +592,16 @@ std::vector<BtBatteryEntry> QueryBluetoothBatteries()
                 (PBYTE)name, (DWORD)sizeof(name), nullptr);
         }
         entry.name = name;
-        entry.is_mouse = NameLooksLikeMouse(entry.name) || DevNodeContainsMouse(entry.instance_id);
+        // 只有带 dev_ 的设备节点才值得向下找鼠标子设备；
+        // GATT 服务节点 / Profile 子节点靠名字判断即可，省掉大量 CM_* 遍历。
+        entry.is_mouse = NameLooksLikeMouse(entry.name)
+            || (has_dev_token && DevNodeContainsMouse(entry.instance_id));
         result.push_back(entry);
     }
 
     ::SetupDiDestroyDeviceInfoList(h_dev);
+    if (total_nodes != nullptr)
+        *total_nodes = scanned;
     return result;
 }
 

@@ -59,6 +59,8 @@ struct MouseIface
 {
     std::wstring path;
     std::wstring product;
+    std::wstring group;        // 含 col 段的完整分组（同集合）
+    std::wstring device_key;   // 去掉 col 段后的设备标识（同一只鼠标的所有集合相同）
     HidTransport transport{ HidTransport::Unknown };
     unsigned short vid{ 0 };
     unsigned short pid{ 0 };
@@ -78,6 +80,12 @@ struct FeatureReportDump
 // 枚举所有可访问的 HID 设备接口
 std::vector<HidIfaceInfo> EnumHidInterfaces();
 
+// 从设备接口路径里取出「同一只物理设备」的标识：把 colNN 段去掉。
+//   鼠标集合  ..._dev_vid&0212d1_pid&1099_..._col01#9&72bd937&0&0000#...
+//   厂商集合  ..._dev_vid&0212d1_pid&1099_..._col02#9&72bd937&0&0001#...
+// 两者的 device_key 相同，据此可以把同一只鼠标的所有集合找齐。
+std::wstring DeviceKeyOf(const std::wstring& path);
+
 // 探测单个接口：是否有电池能力、是否鼠标集合，并顺手读一次电量
 bool ProbeHidInterface(const std::wstring& path, HidProbeResult& out);
 
@@ -94,8 +102,9 @@ bool ReadHidBatteryStrength(const std::wstring& path, int& percent);
 // 读出该接口所有能应答的 feature 报文（诊断用，只读，不会改动设备状态）
 std::vector<FeatureReportDump> DumpFeatureReports(const std::wstring& path);
 
-// 列出所有当前在线的蓝牙设备节点（Dev_ 节点），无论有没有电量属性
-std::vector<BtBatteryEntry> QueryBluetoothBatteries();
+// 列出所有当前在线的蓝牙栈设备节点（BTHENUM / BTHLE / BTHLEDEVICE），无论有没有电量属性。
+// total_nodes 非空时写入扫描到的节点总数，用于区分「一个节点都没枚举到」和「枚举到了但没电量」。
+std::vector<BtBatteryEntry> QueryBluetoothBatteries(unsigned* total_nodes = nullptr);
 
 // 设备节点（含最多 3 层子节点）里是否出现了「鼠标」设备类
 bool DevNodeContainsMouse(const std::wstring& instance_id);
