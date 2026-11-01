@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.14](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.14)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.15](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.15)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.14**，
-下载：[MouseStatus V1.0.14](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.14)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.15**，
+下载：[MouseStatus V1.0.15](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.15)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -300,9 +300,12 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 - 鼠标休眠 / 关机时，电量保留最后一次真实读数，连接方式显示为 `--`（未连接），鼠标提示里会标注读数时间。
 - **雷柏 2.4G 的「是否已连接」靠活性探测**：接收器是常驻设备，鼠标关机后它的 HID 接口依然在，
   所以「接口还在」推不出「鼠标还连着」。插件会周期性往设备的命令通道下发一次「读寄存器」，
-  再从特性通道取应答；有应答才算在线。判离线还要再加上宽限期（探测可用 8 秒、不可用 30 秒）——
-  雷柏鼠标静置时能连着十几秒一帧报文都不发，只看「这一轮有没有数据」必然误判。
-  探测通道不支持该命令的机型会退化成 30 秒档，效果是「关机后慢一点才变 `--`」，不会误报离线。
+  再在 **1.6 秒窗口内每 20ms 轮询**特性报文，首字节变成 `0x01` 才算应答。
+  实测这台 VT3 即使已经静置到插件收不到任何上报，命令下发后约 **270ms** 也会应答
+  （偶发最慢约 800ms，所以窗口要留足）；而关机后 5 秒窗口内 45 次全部不应答，不会误报。
+  判离线用的是「9.5 秒内一次应答都没有」（每 3 秒探一次，连续 3 次失败）——
+  雷柏鼠标静置时最长 3 分钟才发一帧报文，只看「这一轮有没有数据」必然误判。
+  探测通道不支持该命令的机型会退化成 60 秒沉默判定，效果是「关机后慢一点才变 `--`」，不会误报离线。
 - **蓝牙鼠标的「是否已连接」取自蓝牙栈的 `BLUETOOTH_DEVICE_INFO::fConnected`**，不是「PnP 节点是否存在」。
   这一点很关键：`BTHLE\DEV_xxx` 节点在设备关机后**不会从系统里消失**（Windows 会保留已配对设备的
   devnode 与电量缓存，就是「设置」里显示「已配对」的那种状态），单看节点会把关机误判成在线。
@@ -331,7 +334,8 @@ le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.14** | 修复雷柏 2.4G 鼠标「连没连」判断不准：活性探测带着 status 端点挂起的读请求去 ping，特性通道永远拿不到应答，一次失败就被当成断开并关句柄重枚举（界面在有读数与未知之间跳，关机也无法识别）。改为探测前先 `CancelPendingStatusRead`、探测本身加重试与失败明细；离线判定改看「最近一次有应答的时刻」+ 宽限期（探测可用 8s / 不可用 30s），句柄只在真正失效时重建；接收器常驻不再等于鼠标在线 |
+| **V1.0.15** | 雷柏关机识别真正跑通：实测读命令下发后约 **270ms**（偶发 800ms）才把应答写进特性报文，V1.0.14 只睡 30/60ms 就读，探测 100% 失败。改为 1.6 秒窗口内每 20ms 轮询，首字节 `0x01` 才算应答；真机对照开机的 203 次探测全部成功、关机的 45 次全部不应答。离线阈值改为 9.5 秒（关机后约 10 秒翻成 `--`），不再撤销挂起的读请求（挂起读不影响取应答，撤销反而吞上报）；探测不可用的机型退回 60 秒沉默判定 |
+| V1.0.14 | 修复雷柏 2.4G 鼠标「连没连」判断不准：活性探测带着 status 端点挂起的读请求去 ping，特性通道永远拿不到应答，一次失败就被当成断开并关句柄重枚举（界面在有读数与未知之间跳，关机也无法识别）。改为探测前先 `CancelPendingStatusRead`、探测本身加重试与失败明细；离线判定改看「最近一次有应答的时刻」+ 宽限期（探测可用 8s / 不可用 30s），句柄只在真正失效时重建；接收器常驻不再等于鼠标在线 |
 | V1.0.13 | 修复蓝牙鼠标关机后仍显示「已连接」：蓝牙 PnP 节点在设备关机后不会消失，旧版把「节点存在」当成「已连接」；改为查 `BLUETOOTH_DEVICE_INFO::fConnected`，查不到时回退到「HID 接口是否还在」 |
 | V1.0.12 | 采集周期做进设置界面（可编辑 + 应用按钮，改完立即生效，通过事件唤醒工作线程而不必等旧周期走完） |
 | V1.0.11 | 采集周期 400ms → 1000ms（对齐主程序的 `monitor_time_span` 与状态栏重绘），并改为「睡到整周期」避免雷柏等报文把周期拖到 1.2~1.6s；周期可在 ini 的 `refresh_interval_ms` 调整 |
