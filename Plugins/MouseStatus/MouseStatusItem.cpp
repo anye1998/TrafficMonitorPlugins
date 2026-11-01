@@ -63,7 +63,7 @@ void GetIconMetrics(HDC hdc, int& icon_w, int& icon_h)
         icon_h = 11;
         return;
     }
-    icon_h = std::max(8, (tm.tmHeight * 3) / 5);
+    icon_h = std::max(8, (int)((tm.tmHeight * 3) / 5));
     icon_w = (icon_h * 19 + 5) / 10;
 }
 
@@ -251,7 +251,7 @@ int CMouseStatusItem::GetItemWidthEx(void* hDC) const
     ::ZeroMemory(&tm, sizeof(tm));
     if (!::GetTextMetricsW(hdc, &tm))
         return icon_w + 40;
-    const int gap = std::max(2, tm.tmHeight / 6);
+    const int gap = std::max(2, (int)(tm.tmHeight / 6));
 
     SIZE size_percent;
     SIZE size_link;
@@ -279,7 +279,7 @@ void CMouseStatusItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark
     int icon_w = 20;
     int icon_h = 11;
     GetIconMetrics(hdc, icon_w, icon_h);
-    const int gap = std::max(2, tm.tmHeight / 6);
+    const int gap = std::max(2, (int)(tm.tmHeight / 6));
     const int center_y = y + h / 2;
 
     const COLORREF text_color = ::GetTextColor(hdc);

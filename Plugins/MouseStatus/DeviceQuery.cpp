@@ -140,13 +140,15 @@ bool FindBatteryCap(PHIDP_PREPARSED_DATA pp, HIDP_REPORT_TYPE type, USHORT count
     if (count == 0)
         return false;
     std::vector<HIDP_VALUE_CAPS> caps(count);
-    ULONG length = (ULONG)(count * sizeof(HIDP_VALUE_CAPS));
+    USHORT length = count;   // 以「结构个数」为单位
     if (::HidP_GetValueCaps(type, caps.data(), &length, pp) != HIDP_STATUS_SUCCESS)
         return false;
 
-    for (USHORT i = 0; i < count; ++i)
+    for (USHORT i = 0; i < length && i < count; ++i)
     {
-        if (caps[i].UsagePage == kUsagePageGeneric && caps[i].Usage == kUsageBatteryStrength)
+        // 电量强度是单个用途（非范围），因此取 UsageMin
+        if (caps[i].UsagePage == kUsagePageGeneric && !caps[i].IsRange
+            && caps[i].UsageMin == kUsageBatteryStrength)
         {
             out = caps[i];
             return true;
