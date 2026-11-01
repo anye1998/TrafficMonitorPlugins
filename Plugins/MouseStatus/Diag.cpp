@@ -37,6 +37,9 @@ struct DiagState
     bool enabled = true;
     bool hard_disabled = false;    // 环境变量强制关闭
     bool settings_loaded = false;
+    // 日志文件是否已经确认存在。确认一次后就不再每写一行都去查文件属性/大小，
+    // 删除或滚转后会被清回 false，下一次写入重新走 EnsureFile。
+    bool file_ready = false;
     ULONGLONG bytes_written = 0;
 
     DiagState()
@@ -195,9 +198,15 @@ void ResolvePath(DiagState& st)
     st.path = st.dir + L"\\MouseStatus.log";
 }
 
-// 首次写入时落 BOM，保证记事本能正确识别 UTF-8
+// 首次写入时落 BOM，保证记事本能正确识别 UTF-8。
+//
+// 只在第一次（或日志被清空 / 滚转之后）做磁盘检查：早先每写一行都要先查文件属性、
+// 再打开文件取一次大小，写一条日志要开关文件两次。日志繁忙时这部分纯属 IO 开销。
 void EnsureFile(DiagState& st)
 {
+    if (st.file_ready)
+        return;
+
     const DWORD attr = ::GetFileAttributesW(st.path.c_str());
     if (attr != INVALID_FILE_ATTRIBUTES)
     {
@@ -211,16 +220,18 @@ void EnsureFile(DiagState& st)
             st.bytes_written = (ULONGLONG)size.QuadPart;
             ::CloseHandle(h);
         }
-        if (st.bytes_written > kMaxLogBytes)
+
+        if (st.bytes_written <= kMaxLogBytes)
         {
-            const std::wstring old_path = st.path + L".old";
-            ::DeleteFileW(old_path.c_str());
-            ::MoveFileW(st.path.c_str(), old_path.c_str());
-            st.bytes_written = 0;
-            ::DeleteFileW(st.path.c_str());
-        }
-        if (::GetFileAttributesW(st.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            st.file_ready = true;   // 已有文件，后续直接追加
             return;
+        }
+
+        // 超过上限：滚转一次，然后新建一个带头 BOM 的空文件
+        const std::wstring old_path = st.path + L".old";
+        ::DeleteFileW(old_path.c_str());
+        ::MoveFileW(st.path.c_str(), old_path.c_str());
+        st.bytes_written = 0;
     }
 
     HANDLE h = ::CreateFileW(st.path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
@@ -231,6 +242,7 @@ void EnsureFile(DiagState& st)
     DWORD written = 0;
     ::WriteFile(h, bom, 3, &written, nullptr);
     st.bytes_written = written;
+    st.file_ready = true;
     ::CloseHandle(h);
 }
 
@@ -245,6 +257,10 @@ void WriteRaw(DiagState& st, const std::string& utf8)
     ::WriteFile(h, utf8.data(), (DWORD)utf8.size(), &written, nullptr);
     ::CloseHandle(h);
     st.bytes_written += written;
+
+    // 跨过上限后只标记一次，下一次写入前由 EnsureFile 完成滚转（避免每行都判断）
+    if (st.bytes_written > kMaxLogBytes)
+        st.file_ready = false;
 }
 
 std::string ToUtf8(const wchar_t* text, int len)
@@ -381,6 +397,7 @@ bool DeleteLogFiles()
     const std::wstring log_path = st.path;
     const std::wstring old_path = st.path + L".old";
     st.bytes_written = 0;
+    st.file_ready = false;   // 删掉后下一次写要重新建文件并补 BOM
     ::LeaveCriticalSection(&st.cs);
 
     // 日志文件每次写都是「打开-追加-关闭」，不会长期占用句柄，直接删即可

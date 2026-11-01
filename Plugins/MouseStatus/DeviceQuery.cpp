@@ -366,18 +366,6 @@ bool ProbeHidInterface(const std::wstring& path, HidProbeResult& out)
     return out.opened;
 }
 
-bool ReadHidBatteryStrength(const std::wstring& path, int& percent)
-{
-    HidProbeResult probe;
-    percent = -1;
-    if (!ProbeHidInterface(path, probe))
-        return false;
-    if (probe.battery_percent < 0)
-        return false;
-    percent = probe.battery_percent;
-    return true;
-}
-
 bool LooksLikeExternalMouse(const HidIfaceInfo& info, const HidProbeResult& probe)
 {
     if (!probe.is_mouse_collection)

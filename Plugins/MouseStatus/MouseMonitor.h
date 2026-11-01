@@ -7,7 +7,7 @@
 //    两条链路各有各的判据：
 //      · 2.4G 接收器：接收器是常驻设备，鼠标关机后它的 HID 接口依然在，所以不能拿
 //        「接口还在」当在线。改为对鼠标做「活性探测」：往命令通道下发一次读寄存器，
-//        再在 1.6 秒窗口内按 20ms 轮询特性报文，首字节变成 0x01 才算鼠标应了。
+//        再在 2 秒窗口内按 20ms 轮询特性报文，首字节变成 0x01 才算鼠标应了。
 //        真机对照：鼠标开着约 270ms 应答（偶发 800ms），关着则恒回 0x02。
 //        只要探测可用，它的负面结论就当准；个别机型探测不可用时退回「沉默时长」判定。
 //      · 蓝牙：节点在设备关机后也不消失，改查 BLUETOOTH_DEVICE_INFO::fConnected。
@@ -64,6 +64,11 @@ public:
 
     // 立刻执行一次全量枚举并把结果写进诊断日志（初始化时调用一次）
     void DumpDiagnosticsOnce();
+
+    // 请求工作线程尽快执行一次全量诊断。
+    // 供设置对话框 / 右键菜单这类 UI 线程调用：DumpDiagnosticsOnce 会改动工作线程
+    // 持有的报文记录状态，直接跨线程调用会产生数据竞争，所以统一改成「置标志 + 唤醒」。
+    void RequestDiagnosticsDump();
 
     // 当前生效的采集周期（毫秒），供设置窗口展示。
     // 来源：MouseStatus.ini 的 [config] refresh_interval_ms，缺省 1000ms。
@@ -123,6 +128,7 @@ private:
         HidTransport transport{ HidTransport::Unknown };
         unsigned short vid{ 0 };
         unsigned short pid{ 0 };
+        int battery{ -1 };   // 扫描时 ProbeHidInterface 顺手读到的电量
     };
 
     // 雷柏
@@ -201,4 +207,7 @@ private:
     // 工作线程每轮读，避免为了一个 int 再加一把锁。
     // 0 表示「工作线程还没起来、尚未从 ini 读取」，此时查询要走 ini。
     volatile LONG m_period_ms{ 0 };
+
+    // UI 线程请求「立即写入诊断」的标志，由工作线程取走并执行，避免跨线程访问采集状态。
+    volatile LONG m_dump_requested{ 0 };
 };

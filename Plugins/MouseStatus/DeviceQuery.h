@@ -100,9 +100,6 @@ bool LooksLikeExternalMouse(const HidIfaceInfo& info, const HidProbeResult& prob
 // 枚举所有外接鼠标接口，蓝牙的排在前面（优先选无线那只）
 std::vector<MouseIface> EnumMouseInterfaces();
 
-// 从某个 HID 接口读取电池电量。成功返回 true，percent 为 0~100
-bool ReadHidBatteryStrength(const std::wstring& path, int& percent);
-
 // 读出该接口所有能应答的 feature 报文（诊断用，只读，不会改动设备状态）
 std::vector<FeatureReportDump> DumpFeatureReports(const std::wstring& path);
 

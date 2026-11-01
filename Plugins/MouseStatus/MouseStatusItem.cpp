@@ -73,7 +73,7 @@ void GetIconMetrics(HDC hdc, int& icon_w, int& icon_h)
 }
 
 void DrawBatteryIcon(HDC hdc, int left, int top, int width, int height, int percent,
-    COLORREF color)
+    COLORREF color, bool charging, COLORREF outline)
 {
     if (width < 6 || height < 4)
         return;
@@ -118,6 +118,39 @@ void DrawBatteryIcon(HDC hdc, int left, int top, int width, int height, int perc
         }
         ::SelectObject(hdc, old_b);
         ::DeleteObject(brush);
+    }
+
+    // 充电时在电池里叠一个闪电。只用「变绿」表达充电在深色任务栏和色弱用户眼里都不够明显，
+    // 所以给闪电加一圈使用文字色（与背景对比）的描边：压在绿色填充上也不会糊成一团。
+    if (charging)
+    {
+        const int bh = std::max(6, height - 2);
+        const int bw = std::max(3, bh * 3 / 5);
+        const int x0 = left + (body_w - bw) / 2;
+        const int y0 = top + (height - bh) / 2;
+        POINT bolt[6] = {
+            { x0 + bw * 7 / 10, y0 },
+            { x0 + bw / 10, y0 + bh * 55 / 100 },
+            { x0 + bw / 2, y0 + bh * 55 / 100 },
+            { x0 + bw * 45 / 100, y0 + bh },
+            { x0 + bw * 9 / 10, y0 + bh * 45 / 100 },
+            { x0 + bw / 2, y0 + bh * 45 / 100 },
+        };
+
+        HBRUSH bolt_brush = ::CreateSolidBrush(color);
+        HPEN bolt_pen = ::CreatePen(PS_SOLID, 1, outline);
+        if (bolt_brush != nullptr && bolt_pen != nullptr)
+        {
+            HGDIOBJ old_b = ::SelectObject(hdc, bolt_brush);
+            HGDIOBJ old_p = ::SelectObject(hdc, bolt_pen);
+            ::Polygon(hdc, bolt, 6);
+            ::SelectObject(hdc, old_p);
+            ::SelectObject(hdc, old_b);
+        }
+        if (bolt_brush != nullptr)
+            ::DeleteObject(bolt_brush);
+        if (bolt_pen != nullptr)
+            ::DeleteObject(bolt_pen);
     }
 
     ::SelectObject(hdc, old_brush);
@@ -300,7 +333,10 @@ void CMouseStatusItem::DrawItem(void* hDC, int x, int y, int w, int h, bool dark
     const int old_mode = ::SetBkMode(hdc, TRANSPARENT);
 
     const int battery = m_state.live ? m_state.battery : -1;
-    DrawBatteryIcon(hdc, x, center_y - icon_h / 2, icon_w, icon_h, battery, icon_color);
+    const bool charging = m_state.live && m_state.battery >= 0
+        && m_state.charge == ChargeKind::Charging;
+    DrawBatteryIcon(hdc, x, center_y - icon_h / 2, icon_w, icon_h, battery, icon_color,
+        charging, text_color);
 
     int left = x + icon_w + gap;
     int drawn = 0;

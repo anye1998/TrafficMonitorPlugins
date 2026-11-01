@@ -335,10 +335,10 @@ A plugin for [TrafficMonitor](https://github.com/zhongyang219/TrafficMonitor) th
 
 用于在任务栏显示无线 / 蓝牙鼠标电量与连接方式的插件，支持蓝牙（经典 / 低功耗）、2.4G 接收器与 USB 有线三种连接方式，并区分「充电中」与「已充满」。
 
-* 版本：V1.00
+* 版本：V1.0.17
 * 作者：[anye1998](https://github.com/anye1998)
 * 主页：[anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins)
-* 下载链接：[MouseStatus_V1.0.16 · anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.16)
+* 下载链接：[MouseStatus_V1.0.17 · anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.17)
 
 说明：这个版本由本 Fork 维护，只在本仓库发行，上游 `zhongyang219/TrafficMonitorPlugins` 没有对应条目；实现细节见 [README](../README.md#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)。
 

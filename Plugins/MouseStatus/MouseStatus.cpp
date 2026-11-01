@@ -217,7 +217,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.16";
+        return L"1.0.17";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:
@@ -324,10 +324,12 @@ void CMouseStatus::OnPluginCommand(int command_index, void* hWnd, void* para)
         diag::OpenLogFolder();
         break;
     case kCmdDumpNow:
-        // 日志关着的话先打开，否则写出去什么也看不到
+        // 日志关着的话先打开，否则写出去什么也看不到。
+        // 真正的枚举交给工作线程执行（RequestDiagnosticsDump），这里只置请求并唤醒它，
+        // 避免在 UI 线程和采集线程并发访问同一份报文记录状态。
         if (!diag::Enabled())
             diag::SetEnabled(true);
-        CMouseMonitor::Instance().DumpDiagnosticsOnce();
+        CMouseMonitor::Instance().RequestDiagnosticsDump();
         diag::OpenLogFolder();
         break;
     default:
