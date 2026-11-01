@@ -285,7 +285,8 @@ void CMouseMonitor::Run()
     diag::Log(L"=== MouseStatus 停止 ===");
 }
 
-// 把三个源合成为一个快照：优先采用「拿到电量」的源，其次采用「仅确认在线」的源void CMouseMonitor::Compose(const SourceResult& rapoo, const SourceResult& hid,
+// 把三个源合成为一个快照：优先采用「拿到电量」的源，其次采用「仅确认在线」的源
+void CMouseMonitor::Compose(const SourceResult& rapoo, const SourceResult& hid,
     const SourceResult& bt)
 {
     const SourceResult* const order[3] = { &rapoo, &hid, &bt };
