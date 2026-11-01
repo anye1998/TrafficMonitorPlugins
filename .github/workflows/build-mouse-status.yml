@@ -111,5 +111,5 @@ jobs:
             artifacts/MouseStatus_x64.zip \
             artifacts/MouseStatus_x86.zip \
             --repo "${GITHUB_REPOSITORY}" \
-            --title "MouseStatus ${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
             --generate-notes
