@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.11](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.11)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.12](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.12)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.11**，
-下载：[MouseStatus V1.0.11](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.11)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.12**，
+下载：[MouseStatus V1.0.12](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.12)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -152,8 +152,18 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 | 打开日志文件夹 | 用资源管理器打开 `%LOCALAPPDATA%\MouseStatus` |
 | 立即写入诊断信息 | 把当前 HID 接口清单、雷柏端点、蓝牙电量一次性写进日志（日志关着会自动打开） |
 
-菜单里的「插件设置」会打开一个设置对话框，里面是同样的功能：日志开关、日志路径、
-当前文件大小、插件配置文件路径、打开文件夹、清空日志、立即写入诊断。
+菜单里的「插件设置」会打开一个设置对话框：日志开关、日志路径、当前文件大小、
+**采集周期**、插件配置文件路径、打开文件夹、清空日志、立即写入诊断。
+
+采集周期是一个可编辑的输入框（V1.0.12 起）：
+
+```
+采集周期（毫秒）：[ 1000 ] [应用]   200 ~ 30000
+```
+
+只接受数字；点「应用」或回车生效，失焦 / 关闭窗口 / 按 ESC 也会保存。
+输入非法时点「应用」会提示并回退为当前生效值，其它路径静默回退。
+改完**立即生效**，不用重启 TrafficMonitor —— 插件会叫醒工作线程，本轮睡眠直接结束。
 
 日志开关存在 **`<TrafficMonitor>\plugins\MouseStatus.ini`**（和 Battery、DateTime、
 KeyboardIndicator 等插件放在同一个目录，配置方式也一致）：
@@ -164,10 +174,14 @@ enable_log=1
 refresh_interval_ms=1000
 ```
 
-`refresh_interval_ms` 是**采集周期**（毫秒，200~30000，默认 1000）。改成 1000 是刻意的：
-TrafficMonitor 用 `general.monitor_time_span`（默认也是 1000ms）才调一次插件的 `DataRequired`，
-状态栏窗口也是 1000ms 重绘一次，插件采得更快不会让界面更及时。如果你在主程序设置里
-把「监控时间间隔」调成了别的值，可以把这里对齐过去；不写这一行就用默认的 1000。
+`refresh_interval_ms` 就是设置界面里的**采集周期**（毫秒，200~30000，默认 1000），
+两处改的是同一个值。默认 1000 是刻意的：TrafficMonitor 用 `general.monitor_time_span`
+（默认也是 1000ms）才调一次插件的 `DataRequired`，状态栏窗口也是 1000ms 重绘一次，
+插件采得更快不会让界面更及时。如果你在主程序设置里把「监控时间间隔」调成了别的值，
+把这里对齐过去即可；不写这一行就用默认的 1000。
+
+**这个值只影响「多久检查一次」，不影响电量精度**：雷柏是设备主动上报、蓝牙是读系统缓存，
+两者都与采集周期无关。它影响的是插拔充电线、鼠标开关机这些**状态变化被察觉的延迟**。
 
 V1.0.6 之前存在注册表 `HKEY_CURRENT_USER\Software\MouseStatus` 的 `EnableLog`。
 升级后第一次运行会自动把旧值迁移到 ini 并**删除该注册表键**，插件此后不再写注册表。
@@ -306,7 +320,8 @@ le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.11** | 采集周期 400ms → 1000ms（对齐主程序的 `monitor_time_span` 与状态栏重绘），并改为「睡到整周期」避免雷柏等报文把周期拖到 1.2~1.6s；周期可在 ini 的 `refresh_interval_ms` 调整 |
+| **V1.0.12** | 采集周期做进设置界面（可编辑 + 应用按钮，改完立即生效，通过事件唤醒工作线程而不必等旧周期走完） |
+| V1.0.11 | 采集周期 400ms → 1000ms（对齐主程序的 `monitor_time_span` 与状态栏重绘），并改为「睡到整周期」避免雷柏等报文把周期拖到 1.2~1.6s；周期可在 ini 的 `refresh_interval_ms` 调整 |
 | V1.0.10 | 鼠标提示拆成「读数更新于」（数值变化时刻）与「最近检查」（插件轮询时刻），不再让每秒跳动的时间冒充数据新鲜度 |
 | V1.0.9 | 鼠标提示标注蓝牙电量来自「系统缓存值」；README 修正雷柏充电状态说明、补充已实测适配设备（华为 CD20）与蓝牙电量刷新机制 |
 | V1.0.8 | 蓝牙节点枚举补全（支持 `BTHLEDEVICE`、`Dev_` 大小写不敏感）、feature 报文改为按设备采集全部集合（不再只读鼠标集合）；诊断能区分「没扫到蓝牙节点」与「扫到了但没电量」 |
