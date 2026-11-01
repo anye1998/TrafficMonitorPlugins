@@ -22,7 +22,7 @@ constexpr DWORD kReportBudgetMs = 600;           // 每轮最多等待被动上�
 constexpr ULONGLONG kProbeIntervalMs = 3000;     // 无上报时活性探测的间隔
 constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔
 constexpr ULONGLONG kHidRescanMs = 8000;         // 通用 HID 候选重新枚举的间隔
-constexpr ULONGLONG kBluetoothRescanMs = 15000;  // 蓝牙电量属性重新查询的间隔
+constexpr ULONGLONG kBluetoothRescanMs = 6000;   // 蓝牙电量属性重新查询的间隔
 constexpr ULONGLONG kStaleThresholdMs = 8000;    // 无主动探测能力时的「过期」阈值
 
 // 主循环周期。默认与 TrafficMonitor 的采集间隔（general.monitor_time_span，默认 1000）对齐：
@@ -392,8 +392,18 @@ void CMouseMonitor::DumpDiagnosticsOnce()
             [](const BtBatteryEntry& e) { return e.has_battery; }));
     for (const auto& e : bts)
     {
-        diag::Log(L"  le=%d hasBattery=%d battery=%d isMouse=%d name=\"%s\"", e.le ? 1 : 0,
-            e.has_battery ? 1 : 0, e.percent, e.is_mouse ? 1 : 0, e.name.c_str());
+        // 鼠标节点额外查一次真实连接状态：节点存在 ≠ 此刻连着
+        const wchar_t* conn_text = L"";
+        if (e.is_mouse)
+        {
+            bool connected = false;
+            if (QueryBluetoothConnected(e.instance_id, connected))
+                conn_text = connected ? L" conn=已连接" : L" conn=未连接";
+            else
+                conn_text = L" conn=查不到";
+        }
+        diag::Log(L"  le=%d hasBattery=%d battery=%d isMouse=%d name=\"%s\"%s", e.le ? 1 : 0,
+            e.has_battery ? 1 : 0, e.percent, e.is_mouse ? 1 : 0, e.name.c_str(), conn_text);
         diag::Log(L"      id=%s", e.instance_id.c_str());
     }
     if (scanned_nodes == 0)
@@ -1031,6 +1041,18 @@ SourceResult CMouseMonitor::PollHidBattery()
     if (!m_mouse_ifaces.empty())
     {
         const MouseIface& first = m_mouse_ifaces.front();
+
+        // 蓝牙鼠标关机后，系统里的 HID 接口可能还残留一两轮（能打开、能取 caps），
+        // 这时单看接口会把它当成「已连接」。蓝牙栈已经明确说未连接的话，以它为准。
+        const bool is_bt = (first.transport == HidTransport::BtClassic
+            || first.transport == HidTransport::BtLe);
+        if (is_bt && m_bt_conn_state == 0)
+        {
+            diag::LogThrottled(L"hid_bt_offline",
+                L"HID 上仍有蓝牙鼠标接口，但蓝牙栈报告未连接，按离线处理");
+            return result;   // valid 保持 false
+        }
+
         result.valid = true;
         result.battery = first.battery_percent;   // 扫描时读到过就用，读不到是 -1
         result.link = LinkFromTransport(first.transport, first.vid, first.pid, first.product);
@@ -1059,6 +1081,23 @@ SourceResult CMouseMonitor::PollBluetooth()
         m_bt_scan_tick = now;
         m_bt_entries = QueryBluetoothBatteries();
 
+        // 顺手把每个「鼠标」节点的真实连接状态查出来。
+        // 这一步是必须的：BTHLE\DEV_xxx 节点在设备关机后依然存在于系统里，
+        // 只看「节点在不在」会把关机显示成「已连接」。
+        m_bt_conn_state = -1;
+        for (auto& e : m_bt_entries)
+        {
+            if (!e.is_mouse)
+                continue;
+            bool connected = false;
+            e.conn_known = QueryBluetoothConnected(e.instance_id, connected);
+            e.conn_connected = connected;
+            if (e.conn_known && connected)
+                m_bt_conn_state = 1;
+            else if (e.conn_known && m_bt_conn_state != 1)
+                m_bt_conn_state = 0;
+        }
+
         std::wstring sig = std::to_wstring(m_bt_entries.size());
         sig += L'#';
         for (const auto& e : m_bt_entries)
@@ -1068,14 +1107,16 @@ SourceResult CMouseMonitor::PollBluetooth()
             sig += std::to_wstring(e.percent);
             sig += L'|';
             sig += e.has_battery ? L'1' : L'0';
+            sig += e.conn_known ? (e.conn_connected ? L'C' : L'D') : L'?';
         }
         if (sig != m_bt_scan_sig)
         {
             m_bt_scan_sig = sig;
             diag::Log(L"蓝牙设备节点数：%u（清单有变化）", (unsigned)m_bt_entries.size());
             for (const auto& e : m_bt_entries)
-                diag::Log(L"  le=%d hasBattery=%d battery=%d isMouse=%d name=\"%s\" id=%s",
+                diag::Log(L"  le=%d hasBattery=%d battery=%d isMouse=%d conn=%s name=\"%s\" id=%s",
                     e.le ? 1 : 0, e.has_battery ? 1 : 0, e.percent, e.is_mouse ? 1 : 0,
+                    !e.conn_known ? L"查不到" : (e.conn_connected ? L"已连接" : L"未连接"),
                     e.name.c_str(), e.instance_id.c_str());
         }
     }
@@ -1087,6 +1128,24 @@ SourceResult CMouseMonitor::PollBluetooth()
     {
         if (!entry.is_mouse)
             continue;
+
+        // 在线判定的顺序：
+        //   1) 蓝牙栈明确说「未连接」→ 断开了（多半是关机/离开范围），跳过；
+        //   2) 蓝牙栈明确说「已连接」  → 在线；
+        //   3) 查不到连接状态（无 radio / 服务未启动 / 地址没匹配上）→
+        //      退回「HID 上还有没有蓝牙鼠标集合」这个判据，保守处理，不轻易判离线。
+        const bool online = entry.conn_known ? entry.conn_connected : HasBluetoothMouseIface();
+        if (!online)
+        {
+            if (entry.conn_known && m_bt_offline_sig != entry.instance_id)
+            {
+                m_bt_offline_sig = entry.instance_id;
+                diag::Log(L"蓝牙鼠标节点仍在，但设备未连接（按离线处理）：%s",
+                    entry.name.c_str());
+            }
+            continue;
+        }
+
         if (chosen == nullptr)
             chosen = &entry;
         if (entry.has_battery)
@@ -1104,6 +1163,16 @@ SourceResult CMouseMonitor::PollBluetooth()
         result.name = chosen->name.empty() ? L"蓝牙鼠标" : chosen->name;
     }
     return result;
+}
+
+bool CMouseMonitor::HasBluetoothMouseIface() const
+{
+    for (const auto& m : m_mouse_ifaces)
+    {
+        if (m.transport == HidTransport::BtClassic || m.transport == HidTransport::BtLe)
+            return true;
+    }
+    return false;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////

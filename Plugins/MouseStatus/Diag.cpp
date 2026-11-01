@@ -452,6 +452,43 @@ void Log(const wchar_t* fmt, ...)
     ::LeaveCriticalSection(&st.cs);
 }
 
+// 节流日志：同一个 key 在 60 秒内只写一次。
+// 主循环每秒都会跑的判定逻辑用它，避免「状态没变却一直刷同一行」。
+void LogThrottled(const wchar_t* key, const wchar_t* fmt, ...)
+{
+    if (key == nullptr || fmt == nullptr || !Enabled())
+        return;
+
+    // 函数内静态对象的构造在 C++11 起是线程安全的，省得自己写双重检查
+    struct Throttle
+    {
+        CRITICAL_SECTION cs;
+        ULONGLONG tick{ 0 };
+        std::wstring key;
+        Throttle() { ::InitializeCriticalSection(&cs); }
+    };
+    static Throttle state;
+
+    const ULONGLONG now = ::GetTickCount64();
+    ::EnterCriticalSection(&state.cs);
+    const bool skip = (!state.key.empty() && state.key == key && now - state.tick < 60000);
+    if (!skip)
+    {
+        state.key = key;
+        state.tick = now;
+    }
+    ::LeaveCriticalSection(&state.cs);
+    if (skip)
+        return;
+
+    wchar_t body[1024] = { 0 };
+    va_list ap;
+    va_start(ap, fmt);
+    ::_vsnwprintf_s(body, _countof(body), _TRUNCATE, fmt, ap);
+    va_end(ap);
+    Log(L"%s", body);
+}
+
 void LogHex(const wchar_t* label, const unsigned char* data, unsigned int len)
 {
     if (data == nullptr || len == 0 || !Enabled())

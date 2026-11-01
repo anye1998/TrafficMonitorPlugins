@@ -5,6 +5,7 @@
 #include <setupapi.h>
 #include <devpropdef.h>
 #include <cfgmgr32.h>
+#include <bluetoothapis.h>
 #include <algorithm>
 #include <vector>
 #include <cstdlib>
@@ -22,6 +23,7 @@ extern "C"
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "hid.lib")
 #pragma comment(lib, "cfgmgr32.lib")
+#pragma comment(lib, "Bthprops.lib")
 
 namespace {
 
@@ -621,4 +623,153 @@ bool NameLooksLikeMouse(const std::wstring& name)
             return true;
     }
     return false;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// 蓝牙连接状态
+
+namespace {
+
+int HexValue(wchar_t c)
+{
+    if (c >= L'0' && c <= L'9')
+        return (int)(c - L'0');
+    if (c >= L'a' && c <= L'f')
+        return 10 + (int)(c - L'a');
+    if (c >= L'A' && c <= L'F')
+        return 10 + (int)(c - L'A');
+    return -1;
+}
+
+bool IsHexDigit(wchar_t c)
+{
+    return HexValue(c) >= 0;
+}
+
+// 从实例 ID 里取出蓝牙设备的 48 位地址（6 字节，按 ID 里的书写顺序）。
+//
+// 实例 ID 的形态五花八门：
+//   BTHLE\DEV_D1AA72778ACE\7&3D0EA8E&0&D1AA72778ACE
+//   BTHLEDEVICE\{00001812-...}_DEV_VID&0212D1_PID&1099_REV&9020_D1AA72778ACE\8&2A4CAA22&2&0019
+//   BTHENUM\{0000111E-...}_LOCALMFG&0002\7&25CA539&0&048C9AF7FE69_C00000000
+//
+// 里面还混着 GUID 的尾段（00805F9B34FB 也是 12 位十六进制）和 8 位的容器号，
+// 但真正代表设备地址的那一段总是**最靠右**的 12 位片段，所以取最后一个匹配。
+bool ExtractBluetoothAddress(const std::wstring& instance_id, BYTE mac[6])
+{
+    const size_t n = instance_id.size();
+    size_t found = std::wstring::npos;
+
+    for (size_t i = 0; i + 12 <= n; ++i)
+    {
+        if (i > 0)
+        {
+            const wchar_t prev = instance_id[i - 1];
+            if (prev != L'_' && prev != L'\\' && prev != L'&' && prev != L'{')
+                continue;
+        }
+        bool ok = true;
+        for (size_t k = 0; k < 12; ++k)
+        {
+            if (!IsHexDigit(instance_id[i + k]))
+            {
+                ok = false;
+                break;
+            }
+        }
+        if (!ok)
+            continue;
+        if (i + 12 < n)
+        {
+            const wchar_t next = instance_id[i + 12];
+            if (next != L'\\' && next != L'_' && next != L'&' && next != L'}')
+                continue;
+        }
+        found = i;   // 继续往后找，最终留下最靠右的那一段
+    }
+
+    if (found == std::wstring::npos)
+        return false;
+
+    for (int k = 0; k < 6; ++k)
+    {
+        const int hi = HexValue(instance_id[found + k * 2]);
+        const int lo = HexValue(instance_id[found + k * 2 + 1]);
+        if (hi < 0 || lo < 0)
+            return false;
+        mac[k] = (BYTE)((hi << 4) | lo);
+    }
+    return true;
+}
+
+// BLUETOOTH_ADDRESS 的字节序在文档里没写清楚（rgBytes 是从最高位还是最低位开始），
+// 与其猜，不如正反两种都试一遍 —— 反正只有 6 字节。
+bool AddressEquals(const BLUETOOTH_ADDRESS& addr, const BYTE mac[6])
+{
+    if (::memcmp(addr.rgBytes, mac, 6) == 0)
+        return true;
+    BYTE reversed[6] = { 0 };
+    for (int i = 0; i < 6; ++i)
+        reversed[i] = mac[5 - i];
+    return ::memcmp(addr.rgBytes, reversed, 6) == 0;
+}
+
+} // namespace
+
+bool QueryBluetoothConnected(const std::wstring& instance_id, bool& connected)
+{
+    connected = false;
+
+    BYTE mac[6] = { 0 };
+    if (!ExtractBluetoothAddress(instance_id, mac))
+        return false;
+
+    BLUETOOTH_FIND_RADIO_PARAMS params;
+    ::ZeroMemory(&params, sizeof(params));
+    params.dwSize = sizeof(params);
+
+    HANDLE radio = nullptr;
+    HBLUETOOTH_RADIO_FIND h_radio = ::BluetoothFindFirstRadio(&params, &radio);
+    if (h_radio == nullptr)
+        return false;   // 没有蓝牙适配器或 bthserv 没跑
+
+    BLUETOOTH_DEVICE_SEARCH_PARAMS search;
+    ::ZeroMemory(&search, sizeof(search));
+    search.dwSize = sizeof(search);
+    search.fReturnAuthenticated = TRUE;
+    search.fReturnRemembered = TRUE;   // 关键：关机/离线的设备是 "remembered" 状态
+    search.fReturnConnected = TRUE;
+    search.fReturnUnknown = FALSE;
+    search.fIssueInquiry = FALSE;      // 不做搜索，只用系统已知状态，避免几秒的延迟
+    search.cTimeoutMultiplier = 1;
+    search.hRadio = radio;
+
+    bool found = false;
+    BLUETOOTH_DEVICE_INFO info;
+    ::ZeroMemory(&info, sizeof(info));
+    info.dwSize = sizeof(info);
+
+    HBLUETOOTH_DEVICE_FIND h_dev = ::BluetoothFindFirstDevice(&search, &info);
+    if (h_dev != nullptr)
+    {
+        do
+        {
+            if (AddressEquals(info.Address, mac))
+            {
+                found = true;
+                connected = (info.fConnected != FALSE);
+                break;
+            }
+            ::ZeroMemory(&info, sizeof(info));
+            info.dwSize = sizeof(info);
+        } while (::BluetoothFindNextDevice(h_dev, &info));
+
+        ::BluetoothFindDeviceClose(h_dev);
+    }
+
+    ::BluetoothFindRadioClose(h_radio);
+    if (radio != nullptr)
+        ::CloseHandle(radio);
+
+    return found;
 }

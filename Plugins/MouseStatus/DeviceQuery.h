@@ -51,6 +51,10 @@ struct BtBatteryEntry
     bool is_mouse{ false };
     bool has_battery{ false };   // 节点上确实存在电量属性
     int percent{ -1 };
+    // 由 QueryBluetoothConnected 填充：是否成功查到连接状态、查到的结果。
+    // 注意「节点存在」与「此刻连着」是两件事，后者才是在线判定的依据。
+    bool conn_known{ false };
+    bool conn_connected{ false };
 };
 
 // 一个「看起来是外接鼠标」的 HID 集合。
@@ -105,6 +109,17 @@ std::vector<FeatureReportDump> DumpFeatureReports(const std::wstring& path);
 // 列出所有当前在线的蓝牙栈设备节点（BTHENUM / BTHLE / BTHLEDEVICE），无论有没有电量属性。
 // total_nodes 非空时写入扫描到的节点总数，用于区分「一个节点都没枚举到」和「枚举到了但没电量」。
 std::vector<BtBatteryEntry> QueryBluetoothBatteries(unsigned* total_nodes = nullptr);
+
+// 查询某个蓝牙设备节点「此刻是否真的连着」。
+//
+// 为什么需要它：BTHLE\DEV_xxx 这类节点在设备关机/离开范围后**不会从系统里消失**，
+// Windows 会保留已配对设备的 devnode 与电量缓存（「设置 → 蓝牙和设备」里显示为「已配对」）。
+// 所以「节点存在」只能证明设备配对过，不能证明它此刻连着。
+//
+// 实现走 BluetoothFindFirstDevice 枚举已配对设备，比对 48 位地址取 BLUETOOTH_DEVICE_INFO::fConnected。
+// 返回 false 表示**查不到**（蓝牙服务不可用、没有 radio、找不到该设备），此时调用方
+// 不应据此判定离线，应回退到「HID 接口是否还在」的判据。
+bool QueryBluetoothConnected(const std::wstring& instance_id, bool& connected);
 
 // 设备节点（含最多 3 层子节点）里是否出现了「鼠标」设备类
 bool DevNodeContainsMouse(const std::wstring& instance_id);

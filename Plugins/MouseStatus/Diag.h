@@ -54,6 +54,10 @@ bool OpenLogFolder();
 // 写一行日志（自动加时间戳与换行）。fmt 为 printf 风格宽字符格式串。
 void Log(const wchar_t* fmt, ...);
 
+// 节流日志：同一个 key 在 60 秒内只写一次。
+// 主循环每秒都会调用的判定逻辑用这个，避免「状态没变却一直刷同一行」。
+void LogThrottled(const wchar_t* key, const wchar_t* fmt, ...);
+
 // 把一段字节以十六进制写入日志，便于比对厂商报文格式
 void LogHex(const wchar_t* label, const unsigned char* data, unsigned int len);
 

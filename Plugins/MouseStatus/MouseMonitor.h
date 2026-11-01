@@ -84,6 +84,10 @@ private:
     // 把三个源的结果合成为一个快照并发布
     void Compose(const SourceResult& rapoo, const SourceResult& hid, const SourceResult& bt);
 
+    // 本轮 HID 清单里是否有走蓝牙的鼠标集合。
+    // 蓝牙 PnP 节点关机后不会消失，所以「HID 接口是否还在」才是更可靠的在线判据。
+    bool HasBluetoothMouseIface() const;
+
     bool EnsureRapoo();
     bool OpenRapooHandles();
     void CloseRapooHandles();
@@ -146,6 +150,12 @@ private:
     std::vector<BtBatteryEntry> m_bt_entries;
     ULONGLONG m_bt_scan_tick{ 0 };
     std::wstring m_bt_scan_sig;
+    // 上一次记录「节点在但设备未连接」的实例 ID，用于把这条日志限制在状态切换时写一次
+    std::wstring m_bt_offline_sig;
+    // 蓝牙鼠标的连接状态，由 PollBluetooth 维护，供 PollHidBattery 复用：
+    //   -1 未知（没查到）、0 未连接、1 已连接。
+    // 存在的意义是 HID 接口在设备关机后可能残留一两轮，光看接口会让「关机」显示成「已连接」。
+    int m_bt_conn_state{ -1 };
 
     // 日志节流：只在状态变化时写快照
     std::wstring m_last_published;
