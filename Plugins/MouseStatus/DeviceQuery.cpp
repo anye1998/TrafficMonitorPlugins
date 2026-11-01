@@ -8,6 +8,7 @@
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include <string.h>
 #include <cwchar>
 #include <cwctype>
 
