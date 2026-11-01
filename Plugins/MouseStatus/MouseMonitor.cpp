@@ -5,6 +5,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <cstring>
+#include <algorithm>
 
 #include "Diag.h"
 
@@ -314,18 +315,61 @@ void CMouseMonitor::DumpDiagnosticsOnce()
     diag::Log(L"  control=%s", ep.control_path.c_str());
     diag::Log(L"  feature=%s", ep.feature_path.c_str());
 
-    diag::Log(L"--- 蓝牙设备节点电量 ---");
+    diag::Log(L"--- 蓝牙设备节点 ---");
     const std::vector<BtBatteryEntry> bts = QueryBluetoothBatteries();
-    diag::Log(L"带电量属性的蓝牙节点数：%u", (unsigned)bts.size());
+    diag::Log(L"在线蓝牙设备节点数：%u（其中带电量属性 %u 个）", (unsigned)bts.size(),
+        (unsigned)std::count_if(bts.begin(), bts.end(),
+            [](const BtBatteryEntry& e) { return e.has_battery; }));
     for (const auto& e : bts)
     {
-        diag::Log(L"  le=%d battery=%d isMouse=%d name=\"%s\" id=%s", e.le ? 1 : 0, e.percent,
-            e.is_mouse ? 1 : 0, e.name.c_str(), e.instance_id.c_str());
+        diag::Log(L"  le=%d hasBattery=%d battery=%d isMouse=%d name=\"%s\"", e.le ? 1 : 0,
+            e.has_battery ? 1 : 0, e.percent, e.is_mouse ? 1 : 0, e.name.c_str());
+        diag::Log(L"      id=%s", e.instance_id.c_str());
     }
     if (bts.empty())
     {
-        diag::Log(L"  提示：若鼠标确实通过蓝牙连接却没有条目，说明 Windows 没有为该设备缓存电量");
+        diag::Log(L"  提示：没有枚举到任何在线蓝牙设备节点。若鼠标确实连着，"
+                  L"说明它可能走的是经典蓝牙（BTHENUM）以外的通道，或者已被系统挂起");
     }
+    else
+    {
+        const bool any_mouse = std::any_of(bts.begin(), bts.end(),
+            [](const BtBatteryEntry& e) { return e.is_mouse; });
+        if (!any_mouse)
+            diag::Log(L"  提示：节点里没有认出鼠标，检查设备名与子设备类型");
+        else if (std::none_of(bts.begin(), bts.end(),
+                     [](const BtBatteryEntry& e) { return e.is_mouse && e.has_battery; }))
+            diag::Log(L"  提示：认出了鼠标，但 Windows 没有为它缓存电量（设置页里应该也看不到百分比）");
+    }
+
+    // 鼠标是否存在，与能否读到电量是两件事，这里单独列出来
+    diag::Log(L"--- 外接鼠标接口（在线判定的依据） ---");
+    const std::vector<MouseIface> mice = EnumMouseInterfaces();
+    diag::Log(L"外接鼠标接口数：%u", (unsigned)mice.size());
+    for (const auto& m : mice)
+    {
+        diag::Log(L"  vid=%04X pid=%04X transport=%s usagePage=%04X usage=%04X "
+                  L"hasBattery=%d battery=%d name=\"%s\"",
+            (unsigned)m.vid, (unsigned)m.pid, TransportText(m.transport),
+            (unsigned)m.usage_page, (unsigned)m.usage, m.has_battery_usage ? 1 : 0,
+            m.battery_percent, m.product.c_str());
+    }
+
+    // 读一遍 feature 报文：不少蓝牙鼠标把电量放在厂商自定义集合里，
+    // 拿到原始字节才能判断到底是哪一段（也方便后续按型号适配）。
+    for (const auto& m : mice)
+    {
+        if (m.transport != HidTransport::BtLe && m.transport != HidTransport::BtClassic)
+            continue;
+        const std::vector<FeatureReportDump> dumps = DumpFeatureReports(m.path);
+        diag::Log(L"蓝牙鼠标 feature 报文：%u 个（transport=%s）", (unsigned)dumps.size(),
+            TransportText(m.transport));
+        for (const auto& d : dumps)
+        {
+            diag::LogHex(L"  feature 原始字节:", d.data.data(), (unsigned)d.data.size());
+        }
+    }
+
     diag::Log(L"--- 诊断结束 ---");
 
     // 用户按下「立即写入诊断信息」时，顺带重置报文记录预算：
@@ -787,11 +831,56 @@ void CMouseMonitor::ScanHidCandidates()
         m_candidates.push_back(candidate);
     }
 
-    // 每 8 秒扫一次，清单没变化就不重复写日志，避免长期开着日志把文件刷大
-    std::wstring sig;
+    // 同时记下「哪些接口代表一只外接鼠标」—— 这是判断设备是否**在线**的依据，
+    // 与能不能读到电量无关。蓝牙鼠标经常只暴露厂商自定义集合、没有标准电池用途，
+    // 早先这里只收集「有电池用途」的接口，于是它连"在线"都算不上，状态栏一直是 --。
+    m_mouse_ifaces.clear();
+    for (const auto& item : probed)
+    {
+        if (!LooksLikeExternalMouse(item.info, item.result))
+            continue;
+
+        MouseIface iface;
+        iface.path = item.info.path;
+        iface.product = item.info.product;
+        iface.transport = item.info.transport;
+        iface.vid = item.info.vid;
+        iface.pid = item.info.pid;
+        iface.usage_page = item.result.usage_page;
+        iface.usage = item.result.usage;
+        iface.has_battery_usage = item.result.has_battery_usage;
+        iface.battery_percent = item.result.battery_percent;
+        m_mouse_ifaces.push_back(iface);
+    }
+
+    // 蓝牙优先：无线那只才是用户关心的
+    std::stable_sort(m_mouse_ifaces.begin(), m_mouse_ifaces.end(),
+        [](const MouseIface& a, const MouseIface& b)
+        {
+            auto rank = [](const MouseIface& m)
+            {
+                if (m.transport == HidTransport::BtLe || m.transport == HidTransport::BtClassic)
+                    return 0;
+                return 1;
+            };
+            return rank(a) < rank(b);
+        });
+
+    // 每 8 秒扫一次，清单没变化就不重复写日志，避免长期开着日志把文件刷大。
+    // 指纹里带数量前缀：清单为空时也能与"还没扫过"区分开（否则空清单永远不会写一行，
+    // 排查时就看不到"确实扫过、但一个候选都没有"这个关键事实）。
+    std::wstring sig = std::to_wstring(m_candidates.size());
+    sig += L'#';
+    sig += std::to_wstring(m_mouse_ifaces.size());
+    sig += L'#';
     for (const auto& c : m_candidates)
     {
         sig += c.path;
+        sig += L'|';
+    }
+    for (const auto& m : m_mouse_ifaces)
+    {
+        sig += m.path;
         sig += L'|';
     }
     if (sig != m_hid_scan_sig)
@@ -801,6 +890,14 @@ void CMouseMonitor::ScanHidCandidates()
         for (const auto& c : m_candidates)
             diag::Log(L"  候选 vid=%04X pid=%04X transport=%s name=\"%s\"", (unsigned)c.vid,
                 (unsigned)c.pid, TransportText(c.transport), c.product.c_str());
+
+        diag::Log(L"在线鼠标接口数：%u", (unsigned)m_mouse_ifaces.size());
+        for (const auto& m : m_mouse_ifaces)
+            diag::Log(L"  鼠标 vid=%04X pid=%04X transport=%s usagePage=%04X usage=%04X "
+                      L"hasBattery=%d battery=%d name=\"%s\"",
+                (unsigned)m.vid, (unsigned)m.pid, TransportText(m.transport),
+                (unsigned)m.usage_page, (unsigned)m.usage, m.has_battery_usage ? 1 : 0,
+                m.battery_percent, m.product.c_str());
     }
 }
 
@@ -835,6 +932,25 @@ SourceResult CMouseMonitor::PollHidBattery()
         }
         return result;
     }
+
+    // 一个电量都读不到，但确实枚举到了外接鼠标：
+    // 设备是**在线**的，只是它没有把电量暴露成标准 HID 电池用途
+    // （蓝牙鼠标很常见，电量走 GATT 电池服务或厂商自定义报文）。
+    // 这时必须报「在线 + 电量未知」，而不是让显示层回落到「未检测到鼠标」。
+    if (!m_mouse_ifaces.empty())
+    {
+        const MouseIface& first = m_mouse_ifaces.front();
+        result.valid = true;
+        result.battery = first.battery_percent;   // 扫描时读到过就用，读不到是 -1
+        result.link = LinkFromTransport(first.transport, first.vid, first.pid, first.product);
+        result.name = first.product;
+        if (result.name.empty())
+        {
+            result.name = (result.link == LinkKind::Bluetooth
+                              || result.link == LinkKind::BluetoothLE)
+                ? L"蓝牙鼠标" : L"无线鼠标";
+        }
+    }
     return result;
 }
 
@@ -852,34 +968,49 @@ SourceResult CMouseMonitor::PollBluetooth()
         m_bt_scan_tick = now;
         m_bt_entries = QueryBluetoothBatteries();
 
-        std::wstring sig;
+        std::wstring sig = std::to_wstring(m_bt_entries.size());
+        sig += L'#';
         for (const auto& e : m_bt_entries)
         {
             sig += e.instance_id;
             sig += L'|';
             sig += std::to_wstring(e.percent);
             sig += L'|';
+            sig += e.has_battery ? L'1' : L'0';
         }
         if (sig != m_bt_scan_sig)
         {
             m_bt_scan_sig = sig;
-            diag::Log(L"蓝牙电量条目数：%u（清单有变化）", (unsigned)m_bt_entries.size());
+            diag::Log(L"蓝牙设备节点数：%u（清单有变化）", (unsigned)m_bt_entries.size());
             for (const auto& e : m_bt_entries)
-                diag::Log(L"  le=%d battery=%d isMouse=%d name=\"%s\"", e.le ? 1 : 0,
-                    e.percent, e.is_mouse ? 1 : 0, e.name.c_str());
+                diag::Log(L"  le=%d hasBattery=%d battery=%d isMouse=%d name=\"%s\" id=%s",
+                    e.le ? 1 : 0, e.has_battery ? 1 : 0, e.percent, e.is_mouse ? 1 : 0,
+                    e.name.c_str(), e.instance_id.c_str());
         }
     }
 
+    // 优先用「确实带电量属性」的鼠标节点；都没有电量时，退而用在线的那一个，
+    // 这样至少能显示「已连接 / 电量未知」，而不是「未检测到鼠标」。
+    const BtBatteryEntry* chosen = nullptr;
     for (const auto& entry : m_bt_entries)
     {
         if (!entry.is_mouse)
             continue;
+        if (chosen == nullptr)
+            chosen = &entry;
+        if (entry.has_battery)
+        {
+            chosen = &entry;
+            break;
+        }
+    }
 
+    if (chosen != nullptr)
+    {
         result.valid = true;
-        result.link = entry.le ? LinkKind::BluetoothLE : LinkKind::Bluetooth;
-        result.battery = entry.percent;
-        result.name = entry.name.empty() ? L"蓝牙鼠标" : entry.name;
-        return result;
+        result.link = chosen->le ? LinkKind::BluetoothLE : LinkKind::Bluetooth;
+        result.battery = chosen->has_battery ? chosen->percent : -1;
+        result.name = chosen->name.empty() ? L"蓝牙鼠标" : chosen->name;
     }
     return result;
 }

@@ -5,6 +5,7 @@
 #include <setupapi.h>
 #include <devpropdef.h>
 #include <cfgmgr32.h>
+#include <algorithm>
 #include <vector>
 #include <cstdlib>
 #include <cstring>
@@ -70,13 +71,30 @@ bool ParseVidPid(const std::wstring& lower_path, unsigned short& vid, unsigned s
 {
     vid = 0;
     pid = 0;
+
+    // 常规 USB / 2.4G：...hid#vid_046d&pid_c52b&mi_00#...
     const wchar_t* p_vid = ::wcsstr(lower_path.c_str(), L"vid_");
     const wchar_t* p_pid = ::wcsstr(lower_path.c_str(), L"pid_");
+    if (p_vid != nullptr && p_pid != nullptr)
+    {
+        vid = (unsigned short)::wcstoul(p_vid + 4, nullptr, 16);
+        pid = (unsigned short)::wcstoul(p_pid + 4, nullptr, 16);
+        return vid != 0 || pid != 0;
+    }
+
+    // 蓝牙 HID：..._dev_vid&0212d1_pid&1099_rev&9020...
+    //   vid& 后面是 6 位：前 2 位是 Vendor ID Source（02 = 蓝牙 SIG 分配），后 4 位才是 VID。
+    //   不解析的话蓝牙鼠标的 VID/PID 恒为 0，日志里完全看不出是哪家设备。
+    p_vid = ::wcsstr(lower_path.c_str(), L"vid&");
+    p_pid = ::wcsstr(lower_path.c_str(), L"pid&");
     if (p_vid == nullptr || p_pid == nullptr)
         return false;
-    vid = (unsigned short)::wcstoul(p_vid + 4, nullptr, 16);
+
+    const wchar_t* const vid_start = p_vid + 4;
+    if (::wcslen(vid_start) >= 6)
+        vid = (unsigned short)::wcstoul(vid_start + 2, nullptr, 16);   // 跳过 2 位 source
     pid = (unsigned short)::wcstoul(p_pid + 4, nullptr, 16);
-    return true;
+    return vid != 0 || pid != 0;
 }
 
 // 设备接口路径形如 \\?\hid#vid_046d&pid_c52b&mi_00#8&2f1a3c4d&0&0000#{4d1e...}
@@ -325,6 +343,103 @@ bool ReadHidBatteryStrength(const std::wstring& path, int& percent)
     return true;
 }
 
+bool LooksLikeExternalMouse(const HidIfaceInfo& info, const HidProbeResult& probe)
+{
+    if (!probe.is_mouse_collection)
+        return false;
+
+    // 走蓝牙连接的一律算外接鼠标（笔记本内置触摸板不会走蓝牙）
+    if (info.transport == HidTransport::BtClassic || info.transport == HidTransport::BtLe)
+        return true;
+
+    // USB / 2.4G：路径里有 vid_/pid_ 段的才算。
+    // 笔记本内置触摸板是 I2C-HID（hid#elan2205&col01、hid#hidclass 之类），
+    // 路径里没有 VID/PID 段，据此排除，避免把触摸板长期当成"鼠标在线"。
+    return info.vid != 0 && info.pid != 0;
+}
+
+std::vector<MouseIface> EnumMouseInterfaces()
+{
+    std::vector<MouseIface> result;
+
+    const std::vector<HidIfaceInfo> ifaces = EnumHidInterfaces();
+    for (const auto& info : ifaces)
+    {
+        HidProbeResult probe;
+        if (!ProbeHidInterface(info.path, probe))
+            continue;
+        if (!LooksLikeExternalMouse(info, probe))
+            continue;
+
+        MouseIface m;
+        m.path = info.path;
+        m.product = info.product;
+        m.transport = info.transport;
+        m.vid = info.vid;
+        m.pid = info.pid;
+        m.usage_page = probe.usage_page;
+        m.usage = probe.usage;
+        m.has_battery_usage = probe.has_battery_usage;
+        m.battery_percent = probe.battery_percent;
+        result.push_back(m);
+    }
+
+    // 蓝牙优先 —— 无线鼠标的电量才是用户真正关心的，有线/接收器排在后面
+    std::stable_sort(result.begin(), result.end(),
+        [](const MouseIface& a, const MouseIface& b)
+        {
+            auto rank = [](const MouseIface& m)
+            {
+                if (m.transport == HidTransport::BtLe || m.transport == HidTransport::BtClassic)
+                    return 0;
+                return 1;
+            };
+            return rank(a) < rank(b);
+        });
+
+    return result;
+}
+
+std::vector<FeatureReportDump> DumpFeatureReports(const std::wstring& path)
+{
+    std::vector<FeatureReportDump> result;
+
+    HANDLE h = OpenHidShared(path);
+    if (h == INVALID_HANDLE_VALUE)
+        return result;
+
+    PHIDP_PREPARSED_DATA pp = nullptr;
+    if (!::HidD_GetPreparsedData(h, &pp))
+    {
+        ::CloseHandle(h);
+        return result;
+    }
+
+    HIDP_CAPS caps;
+    ::ZeroMemory(&caps, sizeof(caps));
+    if (::HidP_GetCaps(pp, &caps) == HIDP_STATUS_SUCCESS && caps.FeatureReportByteLength > 0
+        && caps.FeatureReportByteLength <= 512)
+    {
+        std::vector<BYTE> buf((size_t)caps.FeatureReportByteLength, 0);
+        for (unsigned int id = 0; id <= 32; ++id)
+        {
+            std::fill(buf.begin(), buf.end(), 0);
+            buf[0] = (BYTE)id;
+            if (!::HidD_GetFeature(h, buf.data(), (ULONG)buf.size()))
+                continue;
+
+            FeatureReportDump dump;
+            dump.report_id = id;
+            dump.data.assign(buf.begin(), buf.end());
+            result.push_back(dump);
+        }
+    }
+
+    ::HidD_FreePreparsedData(pp);
+    ::CloseHandle(h);
+    return result;
+}
+
 bool DevNodeContainsMouse(const std::wstring& instance_id)
 {
     DEVINST dev = 0;
@@ -398,21 +513,28 @@ std::vector<BtBatteryEntry> QueryBluetoothBatteries()
         if (::wcsstr(id, L"Dev_") == nullptr)
             continue;
 
-        DEVPROPTYPE type = 0;
-        BYTE value[64] = { 0 };
-        DWORD size = 0;
-        if (!::SetupDiGetDevicePropertyW(h_dev, &did, &kPkeyBluetoothBattery, &type,
-                value, (DWORD)sizeof(value), &size, 0))
-            continue;
-
-        const long level = ReadNumericProp(value, size, type);
-        if (level < 0 || level > 100)
-            continue;
-
+        // 注意：这里不再「没有电量属性就跳过」。
+        // 没有电量属性本身也是一条重要信息 —— 它说明设备在线、只是 Windows 没缓存电量，
+        // 上层据此可以显示「已连接 / 电量未知」，而不是「未检测到鼠标」。
         BtBatteryEntry entry;
         entry.instance_id = id;
         entry.le = is_bt_le;
-        entry.percent = (int)level;
+        entry.has_battery = false;
+        entry.percent = -1;
+
+        DEVPROPTYPE type = 0;
+        BYTE value[64] = { 0 };
+        DWORD size = 0;
+        if (::SetupDiGetDevicePropertyW(h_dev, &did, &kPkeyBluetoothBattery, &type,
+                value, (DWORD)sizeof(value), &size, 0))
+        {
+            const long level = ReadNumericProp(value, size, type);
+            if (level >= 0 && level <= 100)
+            {
+                entry.has_battery = true;
+                entry.percent = (int)level;
+            }
+        }
 
         wchar_t name[256] = { 0 };
         if (!::SetupDiGetDeviceRegistryPropertyW(h_dev, &did, SPDRP_FRIENDLYNAME, nullptr,
