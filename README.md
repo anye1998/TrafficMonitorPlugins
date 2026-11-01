@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.10](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.10)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.11](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.11)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.10**，
-下载：[MouseStatus V1.0.10](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.10)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.11**，
+下载：[MouseStatus V1.0.11](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.11)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -136,7 +136,7 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 鼠标提示（tooltip）里还会给出设备名、数据来源、两个时间和**诊断日志路径**：
 
 - **读数更新于** —— 电量数值**真正变化**的时刻，这才是数据新鲜度；
-- **最近检查** —— 插件最后一次轮询的时刻（主循环约 400ms 一轮），只说明插件还在盯着。
+- **最近检查** —— 插件最后一次轮询的时刻（默认每 1000ms 一轮，见上面的 `refresh_interval_ms`），只说明插件还在盯着。
 
 两者分开显示是必要的：蓝牙电量取自系统缓存，数值可能几小时不变，
 若只显示一个每秒跳动的时间，会让人误以为「每秒都在重新读电量」。
@@ -161,7 +161,13 @@ KeyboardIndicator 等插件放在同一个目录，配置方式也一致）：
 ```ini
 [config]
 enable_log=1
+refresh_interval_ms=1000
 ```
+
+`refresh_interval_ms` 是**采集周期**（毫秒，200~30000，默认 1000）。改成 1000 是刻意的：
+TrafficMonitor 用 `general.monitor_time_span`（默认也是 1000ms）才调一次插件的 `DataRequired`，
+状态栏窗口也是 1000ms 重绘一次，插件采得更快不会让界面更及时。如果你在主程序设置里
+把「监控时间间隔」调成了别的值，可以把这里对齐过去；不写这一行就用默认的 1000。
 
 V1.0.6 之前存在注册表 `HKEY_CURRENT_USER\Software\MouseStatus` 的 `EnableLog`。
 升级后第一次运行会自动把旧值迁移到 ini 并**删除该注册表键**，插件此后不再写注册表。
@@ -300,7 +306,8 @@ le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.10** | 鼠标提示拆成「读数更新于」（数值变化时刻）与「最近检查」（插件轮询时刻），不再让每秒跳动的时间冒充数据新鲜度 |
+| **V1.0.11** | 采集周期 400ms → 1000ms（对齐主程序的 `monitor_time_span` 与状态栏重绘），并改为「睡到整周期」避免雷柏等报文把周期拖到 1.2~1.6s；周期可在 ini 的 `refresh_interval_ms` 调整 |
+| V1.0.10 | 鼠标提示拆成「读数更新于」（数值变化时刻）与「最近检查」（插件轮询时刻），不再让每秒跳动的时间冒充数据新鲜度 |
 | V1.0.9 | 鼠标提示标注蓝牙电量来自「系统缓存值」；README 修正雷柏充电状态说明、补充已实测适配设备（华为 CD20）与蓝牙电量刷新机制 |
 | V1.0.8 | 蓝牙节点枚举补全（支持 `BTHLEDEVICE`、`Dev_` 大小写不敏感）、feature 报文改为按设备采集全部集合（不再只读鼠标集合）；诊断能区分「没扫到蓝牙节点」与「扫到了但没电量」 |
 | V1.0.7 | 修复蓝牙鼠标「检测不到」：在线判定与电量读取解耦，只要枚举到外接鼠标的 HID 集合就算在线（不再要求它暴露标准电池用途）；笔记本内置触摸板按「I2C-HID 无 VID/PID」排除；日志新增鼠标接口小节与蓝牙 feature 报文 dump |
