@@ -492,8 +492,10 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
         || (std::memcmp(m_last_dumped, m_read_buf, (size_t)cmp_len) != 0);
     const ULONGLONG now = ::GetTickCount64();
     const bool too_soon = (m_last_dumped_tick != 0) && (now - m_last_dumped_tick < 300);
+    // 兜底心跳：状态长时间不变也每 30 秒留一帧，方便事后对比不同时间点的完整报文
+    const bool heartbeat = (m_last_dumped_tick == 0) || (now - m_last_dumped_tick >= 30000);
 
-    if ((content_changed || m_report_dump_budget > 0) && !too_soon)
+    if ((content_changed || heartbeat || m_report_dump_budget > 0) && !too_soon)
     {
         if (m_report_dump_budget > 0)
             --m_report_dump_budget;
