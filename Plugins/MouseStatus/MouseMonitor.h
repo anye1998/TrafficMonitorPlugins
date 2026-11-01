@@ -12,6 +12,12 @@
 //    参考实现用 (statusByte & 0x02) 与 buf[9] == 1/2 判定充电，一旦这些位被置起，
 //    鼠标切回无线后仍会一直显示「充电中」。这里只根据「连接方式 + 电量」推导，
 //    并区分「充电中」与「已充满」。
+//
+// 3) 三个数据源「汇总」而不是「短路」
+//    早期版本里只要雷柏私有协议探测到设备在线，就直接返回并跳过通用 HID 与蓝牙两条
+//    后备链路。结果是：设备认出来了、连接方式也对了，但私有报文里没有有效电量时，
+//    电量就永远停在未知——而且后备链路明明能读到也被挡掉了。现在三个源每轮都跑，
+//    按「谁有电量用谁」合成最终快照。
 #pragma once
 
 #include <windows.h>
@@ -22,6 +28,16 @@
 #include "RapooHid.h"
 #include "DeviceQuery.h"
 
+// 单个数据源一轮探测的结果
+struct SourceResult
+{
+    bool valid{ false };                      // 该源是否认为设备在线
+    LinkKind link{ LinkKind::None };
+    int battery{ -1 };                        // -1 = 该源在线但没拿到电量
+    std::wstring name;
+    DataSource source{ DataSource::None };
+};
+
 class CMouseMonitor
 {
 public:
@@ -30,6 +46,9 @@ public:
     void Start();
     void Stop();
     void GetSnapshot(MouseSnapshot& out);
+
+    // 立刻执行一次全量枚举并把结果写进诊断日志（初始化时调用一次）
+    void DumpDiagnosticsOnce();
 
 private:
     CMouseMonitor();
@@ -40,10 +59,13 @@ private:
     static DWORD WINAPI ThreadProc(LPVOID param);
     void Run();
 
-    // 三个数据来源，按优先级依次尝试
-    bool PollRapoo();
-    bool PollHidBattery();
-    bool PollBluetooth();
+    // 三个数据来源，每轮全部尝试，最后统一合成
+    SourceResult PollRapoo();
+    SourceResult PollHidBattery();
+    SourceResult PollBluetooth();
+
+    // 把三个源的结果合成为一个快照并发布
+    void Compose(const SourceResult& rapoo, const SourceResult& hid, const SourceResult& bt);
 
     bool EnsureRapoo();
     bool OpenRapooHandles();
@@ -82,6 +104,7 @@ private:
     bool m_rapoo_alive{ false };
     ULONGLONG m_rapoo_report_tick{ 0 };
     ULONGLONG m_rapoo_probe_tick{ 0 };
+    int m_rapoo_report_log_count{ 0 };   // 原始报文只记前若干帧，避免刷爆日志
 
     // 通用 HID
     std::vector<HidCandidate> m_candidates;
@@ -90,6 +113,9 @@ private:
     // 蓝牙
     std::vector<BtBatteryEntry> m_bt_entries;
     ULONGLONG m_bt_scan_tick{ 0 };
+
+    // 日志节流：只在状态变化时写快照
+    std::wstring m_last_published;
 
     CRITICAL_SECTION m_cs{};
     bool m_cs_ready{ false };

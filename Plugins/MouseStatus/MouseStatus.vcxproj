@@ -107,6 +107,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="DeviceQuery.h" />
+    <ClInclude Include="Diag.h" />
     <ClInclude Include="MouseMonitor.h" />
     <ClInclude Include="MouseStatus.h" />
     <ClInclude Include="MouseStatusItem.h" />
@@ -116,6 +117,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="DeviceQuery.cpp" />
+    <ClCompile Include="Diag.cpp" />
     <ClCompile Include="MouseMonitor.cpp" />
     <ClCompile Include="MouseStatus.cpp" />
     <ClCompile Include="MouseStatusItem.cpp" />

@@ -261,6 +261,9 @@ bool ProbeHidInterface(const std::wstring& path, HidProbeResult& out)
         out.opened = true;
         out.usage_page = caps.UsagePage;
         out.usage = caps.Usage;
+        out.input_report_len = caps.InputReportByteLength;
+        out.output_report_len = caps.OutputReportByteLength;
+        out.feature_report_len = caps.FeatureReportByteLength;
         out.is_mouse_collection = (caps.UsagePage == kUsagePageDesktop && caps.Usage == kUsageMouse);
 
         HIDP_VALUE_CAPS cap;

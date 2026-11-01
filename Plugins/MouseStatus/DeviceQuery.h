@@ -35,6 +35,10 @@ struct HidProbeResult
     bool has_battery_usage{ false };
     int battery_percent{ -1 };
     bool is_mouse_collection{ false };
+    // 报文长度，仅用于诊断日志（判断端点能力时很有用）
+    int input_report_len{ 0 };
+    int output_report_len{ 0 };
+    int feature_report_len{ 0 };
 };
 
 struct BtBatteryEntry

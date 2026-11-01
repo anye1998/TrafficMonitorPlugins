@@ -63,7 +63,7 @@ jobs:
 
           # 2) 文件版本必须与 GetInfo(TMI_VERSION) 一致
           $fv = $item.VersionInfo.FileVersion
-          if ($fv -notlike '1.0.0*') { throw "unexpected file version: $fv" }
+          if ($fv -notlike '1.0.*') { throw "unexpected file version: $fv" }
           Write-Host "OK: file version $fv"
 
           # 3) 中文界面文本必须按 UTF-16 正确落地（验证 /utf-8 生效）

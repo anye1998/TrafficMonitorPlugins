@@ -6,6 +6,8 @@
 #include <cwctype>
 #include <cstring>
 
+#include "Diag.h"
+
 extern "C"
 {
 #include <hidsdi.h>
@@ -38,6 +40,43 @@ std::wstring ToLower(const std::wstring& s)
     for (auto& ch : r)
         ch = (wchar_t)::towlower(ch);
     return r;
+}
+
+const wchar_t* LinkText(LinkKind link)
+{
+    switch (link)
+    {
+    case LinkKind::Bluetooth: return L"蓝牙";
+    case LinkKind::BluetoothLE: return L"蓝牙LE";
+    case LinkKind::Wireless24G: return L"2.4G";
+    case LinkKind::UsbWired: return L"USB有线";
+    default: break;
+    }
+    return L"无";
+}
+
+const wchar_t* SourceText(DataSource source)
+{
+    switch (source)
+    {
+    case DataSource::Rapoo: return L"雷柏";
+    case DataSource::HidBattery: return L"HID电量";
+    case DataSource::BluetoothProp: return L"蓝牙属性";
+    default: break;
+    }
+    return L"无";
+}
+
+const wchar_t* TransportText(HidTransport t)
+{
+    switch (t)
+    {
+    case HidTransport::Usb: return L"USB";
+    case HidTransport::BtClassic: return L"蓝牙(经典)";
+    case HidTransport::BtLe: return L"蓝牙(LE)";
+    default: break;
+    }
+    return L"未知";
 }
 
 // 充电状态只由「连接方式 + 电量」推导：
@@ -184,19 +223,105 @@ DWORD WINAPI CMouseMonitor::ThreadProc(LPVOID param)
 
 void CMouseMonitor::Run()
 {
+#ifdef _WIN64
+    const wchar_t* arch = L"x64";
+#else
+    const wchar_t* arch = L"Win32";
+#endif
+    diag::Log(L"=== MouseStatus %s 启动，日志：%s ===", arch, diag::LogFilePath().c_str());
+
+    DumpDiagnosticsOnce();
+
     while (::WaitForSingleObject(m_stop, 0) == WAIT_TIMEOUT)
     {
-        bool served = PollRapoo();
-        if (!served)
-            served = PollHidBattery();
-        if (!served)
-            served = PollBluetooth();
-        if (!served)
-            PublishOffline();
+        // 三个数据源每轮都跑，谁有电量用谁；不再「先到先得」短路后备链路
+        const SourceResult rapoo = PollRapoo();
+        const SourceResult hid = PollHidBattery();
+        const SourceResult bt = PollBluetooth();
+        Compose(rapoo, hid, bt);
 
         if (::WaitForSingleObject(m_stop, kIdleSleepMs) == WAIT_OBJECT_0)
             break;
     }
+
+    diag::Log(L"=== MouseStatus 停止 ===");
+}
+
+// 把三个源合成为一个快照：优先采用「拿到电量」的源，其次采用「仅确认在线」的源
+void CMouseMonitor::Compose(const SourceResult& rapoo, const SourceResult& hid,
+    const SourceResult& bt)
+{
+    const SourceResult* const order[3] = { &rapoo, &hid, &bt };
+
+    const SourceResult* with_battery = nullptr;
+    const SourceResult* any_valid = nullptr;
+    for (const SourceResult* src : order)
+    {
+        if (!src->valid)
+            continue;
+        if (any_valid == nullptr)
+            any_valid = src;
+        if (with_battery == nullptr && src->battery >= 0)
+            with_battery = src;
+    }
+
+    if (with_battery != nullptr)
+    {
+        Publish(with_battery->link, with_battery->battery, with_battery->source,
+            with_battery->name);
+        return;
+    }
+    if (any_valid != nullptr)
+    {
+        // 设备在线，但没有任何来源能给出电量
+        Publish(any_valid->link, -1, any_valid->source, any_valid->name);
+        return;
+    }
+    PublishOffline();
+}
+
+// 初始化时把系统里与鼠标相关的信息全量落盘，便于事后定位
+void CMouseMonitor::DumpDiagnosticsOnce()
+{
+    diag::Log(L"--- HID 接口清单 ---");
+    const std::vector<HidIfaceInfo> ifaces = EnumHidInterfaces();
+    diag::Log(L"HID 接口总数：%u", (unsigned)ifaces.size());
+    for (const auto& info : ifaces)
+    {
+        HidProbeResult probe;
+        const bool opened = ProbeHidInterface(info.path, probe);
+        diag::Log(L"  vid=%04X pid=%04X transport=%s open=%d usagePage=%04X usage=%04X "
+                  L"in=%d out=%d feat=%d mouseCollection=%d hasBattery=%d battery=%d name=\"%s\"",
+            info.vid, info.pid, TransportText(info.transport), opened ? 1 : 0, probe.usage_page,
+            probe.usage, probe.input_report_len, probe.output_report_len, probe.feature_report_len,
+            probe.is_mouse_collection ? 1 : 0, probe.has_battery_usage ? 1 : 0,
+            probe.battery_percent, info.product.c_str());
+        diag::Log(L"      path=%s", info.path.c_str());
+    }
+
+    diag::Log(L"--- 雷柏端点探测 ---");
+    rapoo::Endpoints ep;
+    const bool ok = rapoo::FindEndpoints(ep);
+    diag::Log(L"FindEndpoints=%d pid=%s wired=%d statusLen=%d controlLen=%d featureLen=%d",
+        ok ? 1 : 0, ep.pid.c_str(), ep.pid_wired ? 1 : 0, ep.status_report_len,
+        ep.control_report_len, ep.feature_report_len);
+    diag::Log(L"  status =%s", ep.status_path.c_str());
+    diag::Log(L"  control=%s", ep.control_path.c_str());
+    diag::Log(L"  feature=%s", ep.feature_path.c_str());
+
+    diag::Log(L"--- 蓝牙设备节点电量 ---");
+    const std::vector<BtBatteryEntry> bts = QueryBluetoothBatteries();
+    diag::Log(L"带电量属性的蓝牙节点数：%u", (unsigned)bts.size());
+    for (const auto& e : bts)
+    {
+        diag::Log(L"  le=%d battery=%d isMouse=%d name=\"%s\" id=%s", e.le ? 1 : 0, e.percent,
+            e.is_mouse ? 1 : 0, e.name.c_str(), e.instance_id.c_str());
+    }
+    if (bts.empty())
+    {
+        diag::Log(L"  提示：若鼠标确实通过蓝牙连接却没有条目，说明 Windows 没有为该设备缓存电量");
+    }
+    diag::Log(L"--- 诊断结束 ---");
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -216,6 +341,9 @@ bool CMouseMonitor::EnsureRapoo()
     if (m_ep_valid)
     {
         m_rapoo_wired = m_ep.pid_wired;
+        diag::Log(L"雷柏端点已绑定 pid=%s wired=%d statusLen=%d control=%d feature=%d",
+            m_ep.pid.c_str(), m_ep.pid_wired ? 1 : 0, m_ep.status_report_len,
+            m_ep.control_path.empty() ? 0 : 1, m_ep.feature_path.empty() ? 0 : 1);
     }
     return m_ep_valid;
 }
@@ -231,7 +359,10 @@ bool CMouseMonitor::OpenRapooHandles()
         FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_FLAG_OVERLAPPED,
         nullptr);
     if (m_h_status == INVALID_HANDLE_VALUE)
+    {
+        diag::Log(L"雷柏 status 端点打开失败，GetLastError=%lu", ::GetLastError());
         return false;
+    }
 
     if (!m_ep.control_path.empty())
     {
@@ -271,6 +402,9 @@ bool CMouseMonitor::OpenRapooHandles()
             WriteOverlapped(m_h_control, packet, len, 200);
     }
 
+    diag::Log(L"雷柏端点已打开 control=%d feature=%d",
+        m_h_control == INVALID_HANDLE_VALUE ? 0 : 1,
+        m_h_feature == INVALID_HANDLE_VALUE ? 0 : 1);
     return true;
 }
 
@@ -328,12 +462,27 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
 {
     rapoo::Status status;
     if (!rapoo::ParseStatus(m_read_buf, bytes, status))
+    {
+        if (m_rapoo_report_log_count < 12)
+        {
+            ++m_rapoo_report_log_count;
+            diag::LogHex(L"无法解析的雷柏报文（已忽略）:", m_read_buf, bytes);
+        }
         return false;
+    }
 
     m_rapoo_report_tick = ::GetTickCount64();
     m_rapoo_wired = status.wired;
     if (status.battery >= 0)
         m_rapoo_battery = status.battery;
+
+    if (m_rapoo_report_log_count < 12)
+    {
+        ++m_rapoo_report_log_count;
+        diag::Log(L"雷柏状态报文 battery=%d wired=%d dpi=%d bytes=%lu", status.battery,
+            status.wired ? 1 : 0, status.dpi, bytes);
+        diag::LogHex(L"  原始字节:", m_read_buf, bytes);
+    }
     return true;
 }
 
@@ -371,13 +520,19 @@ bool CMouseMonitor::ReadRapooReports(int budget_ms)
 
         const DWORD err = ::GetLastError();
         if (err != ERROR_IO_PENDING)
+        {
+            diag::Log(L"雷柏 ReadFile 失败，GetLastError=%lu，将重新打开端点", err);
             return false;   // 句柄失效，交给上层重新打开
+        }
 
         const DWORD wait = ::WaitForSingleObject(m_read_event, 250);
         if (wait == WAIT_OBJECT_0)
         {
             if (!::GetOverlappedResult(m_h_status, &m_ov, &bytes, FALSE))
+            {
+                diag::Log(L"雷柏 GetOverlappedResult 失败，GetLastError=%lu", ::GetLastError());
                 return false;
+            }
             if (bytes > 0 && ApplyRapooReport(bytes))
                 got = true;
         }
@@ -420,20 +575,36 @@ bool CMouseMonitor::ProbeRapooAlive()
     static BYTE feature_buf[128];
     ::ZeroMemory(feature_buf, sizeof(feature_buf));
     feature_buf[0] = rapoo::ID_FEATURE;
-    return ::HidD_GetFeature(m_h_feature, feature_buf, (ULONG)report_len) != FALSE;
+    if (!::HidD_GetFeature(m_h_feature, feature_buf, (ULONG)report_len))
+        return false;
+
+    // 全零应答等同于没有应答：部分驱动在设备休眠时仍会「成功」返回一块空缓冲区
+    bool all_zero = true;
+    for (int i = 1; i < report_len; ++i)
+    {
+        if (feature_buf[i] != 0)
+        {
+            all_zero = false;
+            break;
+        }
+    }
+    return !all_zero;
 }
 
-bool CMouseMonitor::PollRapoo()
+SourceResult CMouseMonitor::PollRapoo()
 {
+    SourceResult result;
+    result.source = DataSource::Rapoo;
+
     if (!EnsureRapoo())
-        return false;
+        return result;
 
     if (m_h_status == INVALID_HANDLE_VALUE)
     {
         if (!OpenRapooHandles())
         {
             m_ep_valid = false;
-            return false;
+            return result;
         }
         m_rapoo_report_tick = 0;
     }
@@ -464,22 +635,21 @@ bool CMouseMonitor::PollRapoo()
     {
         CloseRapooHandles();
         m_ep_valid = false;
-        return false;
+        return result;
     }
 
-    const LinkKind link = m_rapoo_wired ? LinkKind::UsbWired : LinkKind::Wireless24G;
-
-    std::wstring name;
     const unsigned short pid = (unsigned short)::wcstoul(
         m_ep.pid.empty() ? L"0" : m_ep.pid.c_str(), nullptr, 0);
     const wchar_t* model = rapoo::ModelNameFromPid(pid);
     if (model != nullptr && model[0] != L'\0')
-        name = model;
+        result.name = model;
     else
-        name = L"Rapoo";
+        result.name = L"Rapoo";
 
-    Publish(link, m_rapoo_battery, DataSource::Rapoo, name);
-    return true;
+    result.valid = true;
+    result.link = m_rapoo_wired ? LinkKind::UsbWired : LinkKind::Wireless24G;
+    result.battery = m_rapoo_battery;
+    return result;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -503,9 +673,8 @@ void CMouseMonitor::ScanHidCandidates()
 
     for (const auto& info : ifaces)
     {
-        if (info.vid == rapoo::VENDOR_ID)
-            continue;   // 雷柏设备走私有协议，避免重复识别
-
+        // 注意：这里不再跳过雷柏设备。雷柏私有协议读不到电量时（不同型号/固件差异），
+        // 通用 HID 电池用途是唯一还能拿到数字的后备路径。
         HidProbeResult result;
         if (!ProbeHidInterface(info.path, result))
             continue;
@@ -533,8 +702,12 @@ void CMouseMonitor::ScanHidCandidates()
                 break;
             }
         }
-        // 同一物理设备里存在鼠标集合，或产品名本身写着鼠标，才认为是鼠标的电量
-        if (!group_is_mouse && !NameLooksLikeMouse(item.info.product))
+
+        // 同一物理设备里存在鼠标集合，或产品名本身写着鼠标，才认为是鼠标的电量；
+        // 雷柏的话鼠标 0x14xx/0x46xx 产品线已按 PID 认定过，直接放行
+        const bool is_rapoo_mouse = (item.info.vid == rapoo::VENDOR_ID
+            && (((item.info.pid & 0xFF00) == 0x1400) || ((item.info.pid & 0xFF00) == 0x4600)));
+        if (!group_is_mouse && !NameLooksLikeMouse(item.info.product) && !is_rapoo_mouse)
             continue;
 
         HidCandidate candidate;
@@ -545,10 +718,18 @@ void CMouseMonitor::ScanHidCandidates()
         candidate.pid = item.info.pid;
         m_candidates.push_back(candidate);
     }
+
+    diag::Log(L"通用 HID 电量候选设备数：%u", (unsigned)m_candidates.size());
+    for (const auto& c : m_candidates)
+        diag::Log(L"  候选 vid=%04X pid=%04X transport=%s name=\"%s\"", c.vid, c.pid,
+            TransportText(c.transport), c.product.c_str());
 }
 
-bool CMouseMonitor::PollHidBattery()
+SourceResult CMouseMonitor::PollHidBattery()
 {
+    SourceResult result;
+    result.source = DataSource::HidBattery;
+
     const ULONGLONG now = ::GetTickCount64();
     if (m_hid_scan_tick == 0 || now - m_hid_scan_tick >= kHidRescanMs)
     {
@@ -562,47 +743,53 @@ bool CMouseMonitor::PollHidBattery()
         if (!ReadHidBatteryStrength(candidate.path, percent))
             continue;
 
-        const LinkKind link = LinkFromTransport(candidate.transport, candidate.vid,
-            candidate.pid, candidate.product);
-        std::wstring name = candidate.product;
-        if (name.empty())
-            name = (link == LinkKind::Bluetooth || link == LinkKind::BluetoothLE)
+        result.valid = true;
+        result.link = LinkFromTransport(candidate.transport, candidate.vid, candidate.pid,
+            candidate.product);
+        result.battery = percent;
+        result.name = candidate.product;
+        if (result.name.empty())
+        {
+            result.name = (result.link == LinkKind::Bluetooth
+                              || result.link == LinkKind::BluetoothLE)
                 ? L"蓝牙鼠标" : L"无线鼠标";
-        Publish(link, percent, DataSource::HidBattery, name);
-        return true;
+        }
+        return result;
     }
-    return false;
+    return result;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
 // 蓝牙设备节点属性
 
-bool CMouseMonitor::PollBluetooth()
+SourceResult CMouseMonitor::PollBluetooth()
 {
+    SourceResult result;
+    result.source = DataSource::BluetoothProp;
+
     const ULONGLONG now = ::GetTickCount64();
     if (m_bt_scan_tick == 0 || now - m_bt_scan_tick >= kBluetoothRescanMs)
     {
         m_bt_scan_tick = now;
         m_bt_entries = QueryBluetoothBatteries();
+        diag::Log(L"蓝牙电量条目数：%u", (unsigned)m_bt_entries.size());
+        for (const auto& e : m_bt_entries)
+            diag::Log(L"  le=%d battery=%d isMouse=%d name=\"%s\"", e.le ? 1 : 0, e.percent,
+                e.is_mouse ? 1 : 0, e.name.c_str());
     }
 
-    const BtBatteryEntry* chosen = nullptr;
     for (const auto& entry : m_bt_entries)
     {
         if (!entry.is_mouse)
             continue;
-        chosen = &entry;
-        break;
-    }
-    if (chosen == nullptr)
-        return false;
 
-    const LinkKind link = chosen->le ? LinkKind::BluetoothLE : LinkKind::Bluetooth;
-    std::wstring name = chosen->name;
-    if (name.empty())
-        name = L"蓝牙鼠标";
-    Publish(link, chosen->percent, DataSource::BluetoothProp, name);
-    return true;
+        result.valid = true;
+        result.link = entry.le ? LinkKind::BluetoothLE : LinkKind::Bluetooth;
+        result.battery = entry.percent;
+        result.name = entry.name.empty() ? L"蓝牙鼠标" : entry.name;
+        return result;
+    }
+    return result;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -613,6 +800,7 @@ void CMouseMonitor::Publish(LinkKind link, int battery, DataSource source,
     if (!m_cs_ready)
         return;
 
+    std::wstring signature;
     ::EnterCriticalSection(&m_cs);
     if (battery >= 0)
     {
@@ -631,7 +819,24 @@ void CMouseMonitor::Publish(LinkKind link, int battery, DataSource source,
     if (!name.empty())
         m_snapshot.device_name = name;
     m_snapshot.charge = DeriveCharge(link, m_snapshot.battery);
+
+    signature = std::to_wstring((int)link);
+    signature += L"|";
+    signature += std::to_wstring(m_snapshot.battery);
+    signature += L"|";
+    signature += std::to_wstring((int)source);
+    signature += L"|";
+    signature += std::to_wstring(m_snapshot.charge == ChargeKind::Unknown ? 0 : 1);
+    signature += L"|";
+    signature += m_snapshot.device_name;
     ::LeaveCriticalSection(&m_cs);
+
+    if (signature != m_last_published)
+    {
+        m_last_published = signature;
+        diag::Log(L"快照更新：link=%s battery=%d source=%s name=\"%s\"", LinkText(link), battery,
+            SourceText(source), name.c_str());
+    }
 }
 
 void CMouseMonitor::PublishOffline()
@@ -647,4 +852,10 @@ void CMouseMonitor::PublishOffline()
     if (m_snapshot.battery >= 0)
         m_snapshot.battery_is_stale = true;
     ::LeaveCriticalSection(&m_cs);
+
+    if (m_last_published != L"offline")
+    {
+        m_last_published = L"offline";
+        diag::Log(L"快照更新：未检测到在线鼠标");
+    }
 }

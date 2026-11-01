@@ -5,6 +5,7 @@
 #include <cwchar>
 
 #include "MouseMonitor.h"
+#include "Diag.h"
 #include "resource.h"
 
 namespace {
@@ -122,7 +123,7 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
 
     if (!state.live)
     {
-        text = L"未检测到已连接的鼠标";
+        text = L"未检测到在线鼠标";
         if (state.battery >= 0)
         {
             text += L"\n上次读数：";
@@ -135,23 +136,35 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
                 text += L"）";
             }
         }
+        text += L"\n若鼠标确实已连接，请查看日志：\n";
+        text += diag::LogFilePath();
         m_tooltip = text;
         return;
     }
 
-    if (!state.device_name.empty())
-    {
-        text += state.device_name;
-        text += L"\n";
-    }
-    text += L"连接方式：";
+    text += state.device_name.empty() ? L"鼠标" : state.device_name;
+    text += L"\n连接方式：";
     text += LinkName(state.link);
+
     text += L"\n电量：";
-    text += (state.battery >= 0) ? (ToWString(state.battery) + L"%") : std::wstring(L"未知");
-    if (state.battery_is_stale)
-        text += L"（上次读数）";
+    if (state.battery < 0)
+    {
+        text += L"设备未上报电量";
+    }
+    else
+    {
+        text += ToWString(state.battery);
+        text += L"%";
+        if (state.battery_is_stale)
+            text += L"（上次读数）";
+    }
+
     text += L"\n状态：";
-    text += ChargeName(state.charge);
+    if (state.battery < 0)
+        text += L"无法判定（缺少电量数据）";
+    else
+        text += ChargeName(state.charge);
+
     text += L"\n数据来源：";
     text += SourceName(state.source);
     if (!state.last_seen.empty())
@@ -159,6 +172,15 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
         text += L"\n更新于 ";
         text += state.last_seen;
     }
+
+    if (state.battery < 0)
+    {
+        text += L"\n提示：该设备的电量没有通过标准 HID 电池用途"
+                L"（Usage Page 0x06 / Usage 0x20）或蓝牙设备属性暴露给系统，"
+                L"插件拿不到数字。日志里有完整的枚举结果：\n";
+        text += diag::LogFilePath();
+    }
+
     m_tooltip = text;
 }
 
@@ -175,7 +197,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.0";
+        return L"1.0.1";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:

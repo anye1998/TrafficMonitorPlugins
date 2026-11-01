@@ -8,12 +8,15 @@
 
 namespace {
 
-const wchar_t* const kUnknown = L"--";
+const wchar_t* const kUnknown = L"--";   // 完全没检测到设备
+const wchar_t* const kNoReading = L"?";  // 设备在线，但没有任何来源能给出电量
 
 std::wstring FormatBattery(const MouseSnapshot& state)
 {
-    if (!state.live || state.battery < 0)
+    if (!state.live)
         return kUnknown;
+    if (state.battery < 0)
+        return kNoReading;
     wchar_t buf[16] = { 0 };
     ::swprintf_s(buf, L"%d%%", state.battery);
     return std::wstring(buf);
@@ -40,8 +43,10 @@ std::wstring FormatLink(const MouseSnapshot& state)
 
 std::wstring FormatCharge(const MouseSnapshot& state)
 {
-    if (!state.live || state.battery < 0)
+    if (!state.live)
         return kUnknown;
+    if (state.battery < 0)
+        return kNoReading;
     switch (state.charge)
     {
     case ChargeKind::Charging: return L"充电中";
