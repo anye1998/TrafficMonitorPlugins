@@ -146,9 +146,9 @@ bool FindBatteryCap(PHIDP_PREPARSED_DATA pp, HIDP_REPORT_TYPE type, USHORT count
 
     for (USHORT i = 0; i < length && i < count; ++i)
     {
-        // 电量强度是单个用途（非范围），因此取 UsageMin
-        if (caps[i].UsagePage == kUsagePageGeneric && !caps[i].IsRange
-            && caps[i].UsageMin == kUsageBatteryStrength)
+        // HIDP_VALUE_CAPS 把用途放在联合体 u 里：单用途时 u.Usage（与 u.UsageMin 同址）
+        if (caps[i].UsagePage == kUsagePageGeneric && caps[i].IsRange == 0
+            && caps[i].u.UsageMin == kUsageBatteryStrength)
         {
             out = caps[i];
             return true;
