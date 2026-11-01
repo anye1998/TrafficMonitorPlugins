@@ -10,6 +10,8 @@
 #include <cwchar>
 #include <cwctype>
 
+#include "Diag.h"
+
 extern "C"
 {
 #include <hidsdi.h>
@@ -311,36 +313,123 @@ bool FindEndpoints(Endpoints& out)
     if (infos.empty())
         return false;
 
-    auto pick = [&infos](Endpoints& ep, bool vendor_page_only)
+    // 端点选择规则（对着真机的 HID 描述符核对过）：
+    //
+    // VT3 / VT3S / VT7 这类机型在同一条 VID/PID 下暴露了多个「厂商自定义 Usage Page」
+    // (0xFF00) 集合，但只有 Usage == 0x0002 的那个会推送 0x07 状态报文：
+    //
+    //   col02  usagePage=0001 usage=0006  键盘        ← 不是鼠标通道
+    //   col05  usagePage=FF00 usage=000E  in=33/out=33 ← 配置/升级通道，从不发状态报文
+    //   col06  usagePage=FF00 usage=000F  feat=33      ← 寄存器读应答
+    //   col07  usagePage=FF00 usage=0010  feat=33      ← 另一个寄存器通道
+    //   col08  usagePage=FF00 usage=0011  in=32/out=32
+    //   col09  usagePage=FF00 usage=0002  in=19/out=19 ← ★ 真正上报 0x07 状态报文
+    //   col0a  usagePage=FF00 usage=0012  in=24/out=24
+    //   mi_02  usagePage=FF00 usage=0001  in=513/out=513 ← 固件升级
+    //
+    // 早期版本按「第一个 in_len >= 9」去挑，结果正好挑中 col05 这个 33 字节的配置通道：
+    // 设备在线、连接方式也对，但一个 0x07 报文都收不到，于是电量永远未知。
+    // 现在改为按 Usage 精确匹配，长度只作兜底。
+    constexpr USHORT kVendorPage = 0xFF00;
+    constexpr USHORT kStatusUsage = 0x0002;
+    constexpr USHORT kConfigUsage = 0x000E;
+
+    const IfaceInfo* status = nullptr;
+    const IfaceInfo* control = nullptr;
+    const IfaceInfo* feature = nullptr;
+
+    for (const auto& info : infos)
+    {
+        if (info.usage_page != kVendorPage || info.in_len < 9)
+            continue;
+        if (info.usage == kStatusUsage)
+        {
+            status = &info;
+            break;
+        }
+        // 兜底一：路径里明确带 col09 且长度够放一帧状态报文
+        if (status == nullptr && info.in_len >= 19 && info.usage != kConfigUsage
+            && ToLower(info.path).find(L"col09") != std::wstring::npos)
+        {
+            status = &info;
+        }
+    }
+    // 兜底二：任意厂商集合，排除 33 字节配置通道
+    if (status == nullptr)
     {
         for (const auto& info : infos)
         {
-            if (vendor_page_only && info.usage_page != 0xFF00)
+            if (info.usage_page != kVendorPage || info.in_len < 9
+                || info.usage == kConfigUsage)
+            {
                 continue;
-            if (ep.status_path.empty() && info.in_len >= 9)
-            {
-                ep.status_path = info.path;
-                ep.status_report_len = info.in_len;
             }
-            if (ep.control_path.empty() && info.out_len >= 33)
-            {
-                ep.control_path = info.path;
-                ep.control_report_len = info.out_len;
-            }
-            if (ep.feature_path.empty() && info.feat_len >= 33)
-            {
-                ep.feature_path = info.path;
-                ep.feature_report_len = info.feat_len;
-            }
+            status = &info;
+            break;
         }
-    };
+    }
 
-    // 先按厂商自定义 Usage Page（0xFF00）筛选，与参考实现一致；缺失的再用长度兜底
-    pick(out, true);
-    pick(out, false);
+    // 控制端点只用来下发 33 字节命令包（解锁 / 读寄存器），要能容纳 33 字节才可用。
+    // 同一设备上还有个 513 字节的固件升级集合，长度也 >= 33，但写入必须严格匹配
+    // 报告长度，所以这里取「不小于 33 的最小者」，正好落在 33 字节的命令通道上。
+    for (const auto& info : infos)
+    {
+        if (info.usage_page != kVendorPage || info.out_len < 33)
+            continue;
+        if (control == nullptr || info.out_len < control->out_len)
+            control = &info;
+    }
+
+    // 特性端点用于读寄存器应答（活性探测），同样取不小于 33 的最小者
+    for (const auto& info : infos)
+    {
+        if (info.feat_len < 33)
+            continue;
+        if (feature == nullptr || info.feat_len < feature->feat_len)
+            feature = &info;
+    }
+    if (feature == nullptr)
+    {
+        for (const auto& info : infos)
+        {
+            if (info.feat_len < 9)
+                continue;
+            if (feature == nullptr || info.feat_len < feature->feat_len)
+                feature = &info;
+        }
+    }
+
+    if (status != nullptr)
+    {
+        out.status_path = status->path;
+        out.status_report_len = status->in_len;
+    }
+    if (control != nullptr)
+    {
+        out.control_path = control->path;
+        out.control_report_len = control->out_len;
+    }
+    if (feature != nullptr)
+    {
+        out.feature_path = feature->path;
+        out.feature_report_len = feature->feat_len;
+    }
 
     out.pid = chosen->pid_text;
     out.pid_wired = chosen->wired;
+
+    diag::Log(L"雷柏端点候选（pid=%s，共 %u 个接口，选中 status=%s）：",
+        chosen->pid_text.c_str(), (unsigned)infos.size(),
+        status == nullptr ? L"无" : status->path.c_str());
+    for (const auto& info : infos)
+    {
+        diag::Log(L"   usagePage=%04X usage=%04X in=%d out=%d feat=%d role=%s",
+            (unsigned)info.usage_page, (unsigned)info.usage, info.in_len, info.out_len,
+            info.feat_len,
+            (&info == status) ? L"status"
+                              : ((&info == control) ? L"control"
+                                                    : ((&info == feature) ? L"feature" : L"-")));
+    }
 
     // 只要拿得到被动上报就算可用（部分机型不开放控制/特性端点）
     return out.HasStatus();

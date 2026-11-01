@@ -410,6 +410,7 @@ bool CMouseMonitor::OpenRapooHandles()
 
 void CMouseMonitor::CloseRapooHandles()
 {
+    CancelPendingStatusRead();
     if (m_h_status != INVALID_HANDLE_VALUE)
     {
         ::CloseHandle(m_h_status);
@@ -486,6 +487,11 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
     return true;
 }
 
+// 读一帧状态报文。
+//
+// 关键点：status 端点上的读请求「跨轮次挂起」——本轮等不到就原样留着，下轮接着等，
+// 而不是每次超时都 CancelIoEx。雷柏的状态报文是周期性的（空闲时可能好几秒才来一帧），
+// 早先每轮只等 250ms 就取消，等待窗口被切成碎片，很容易永远错过。
 bool CMouseMonitor::ReadRapooReports(int budget_ms)
 {
     if (m_h_status == INVALID_HANDLE_VALUE)
@@ -501,57 +507,74 @@ bool CMouseMonitor::ReadRapooReports(int budget_ms)
     while (::GetTickCount64() - begin < (ULONGLONG)budget_ms)
     {
         if (::WaitForSingleObject(m_stop, 0) == WAIT_OBJECT_0)
-            break;
+            return got;
 
-        ::ResetEvent(m_read_event);
-        ::ZeroMemory(&m_ov, sizeof(m_ov));
-        m_ov.hEvent = m_read_event;
-        m_ov.Offset = 0;
-        m_ov.OffsetHigh = 0;
-
-        DWORD bytes = 0;
-        const BOOL ok = ::ReadFile(m_h_status, m_read_buf, (DWORD)report_len, &bytes, &m_ov);
-        if (ok)
+        if (!m_status_read_pending)
         {
-            if (bytes > 0 && ApplyRapooReport(bytes))
-                got = true;
-            continue;
+            ::ResetEvent(m_read_event);
+            ::ZeroMemory(&m_ov, sizeof(m_ov));
+            m_ov.hEvent = m_read_event;
+            m_ov.Offset = 0;
+            m_ov.OffsetHigh = 0;
+
+            DWORD bytes = 0;
+            const BOOL ok = ::ReadFile(m_h_status, m_read_buf, (DWORD)report_len, &bytes, &m_ov);
+            if (ok)
+            {
+                if (bytes > 0 && ApplyRapooReport(bytes))
+                    got = true;
+                continue;   // 同步完成，立刻再发一帧
+            }
+
+            const DWORD err = ::GetLastError();
+            if (err != ERROR_IO_PENDING)
+            {
+                diag::Log(L"雷柏 ReadFile 失败，GetLastError=%lu，将重新打开端点", err);
+                return false;   // 句柄失效，交给上层重新打开
+            }
+            m_status_read_pending = true;
         }
 
-        const DWORD err = ::GetLastError();
-        if (err != ERROR_IO_PENDING)
-        {
-            diag::Log(L"雷柏 ReadFile 失败，GetLastError=%lu，将重新打开端点", err);
-            return false;   // 句柄失效，交给上层重新打开
-        }
-
-        const DWORD wait = ::WaitForSingleObject(m_read_event, 250);
+        const ULONGLONG elapsed = ::GetTickCount64() - begin;
+        const DWORD remain = (DWORD)((ULONGLONG)budget_ms > elapsed
+                                         ? ((ULONGLONG)budget_ms - elapsed)
+                                         : 1);
+        const DWORD wait = ::WaitForSingleObject(m_read_event, remain);
         if (wait == WAIT_OBJECT_0)
         {
+            DWORD bytes = 0;
             if (!::GetOverlappedResult(m_h_status, &m_ov, &bytes, FALSE))
             {
+                m_status_read_pending = false;
                 diag::Log(L"雷柏 GetOverlappedResult 失败，GetLastError=%lu", ::GetLastError());
                 return false;
             }
+            m_status_read_pending = false;
             if (bytes > 0 && ApplyRapooReport(bytes))
                 got = true;
         }
         else if (wait == WAIT_TIMEOUT)
         {
-            ::CancelIoEx(m_h_status, &m_ov);
-            DWORD dummy = 0;
-            ::GetOverlappedResult(m_h_status, &m_ov, &dummy, TRUE);
-            break;          // 本轮没有被动上报
+            // 本轮没等到，保留这一帧读请求继续挂着
+            break;
         }
         else
         {
-            ::CancelIoEx(m_h_status, &m_ov);
-            DWORD dummy = 0;
-            ::GetOverlappedResult(m_h_status, &m_ov, &dummy, TRUE);
+            CancelPendingStatusRead();
             return false;
         }
     }
     return got;
+}
+
+void CMouseMonitor::CancelPendingStatusRead()
+{
+    if (m_h_status == INVALID_HANDLE_VALUE || !m_status_read_pending)
+        return;
+    ::CancelIoEx(m_h_status, &m_ov);
+    DWORD dummy = 0;
+    ::GetOverlappedResult(m_h_status, &m_ov, &dummy, TRUE);
+    m_status_read_pending = false;
 }
 
 bool CMouseMonitor::ProbeRapooAlive()

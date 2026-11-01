@@ -71,6 +71,7 @@ private:
     bool OpenRapooHandles();
     void CloseRapooHandles();
     bool ReadRapooReports(int budget_ms);
+    void CancelPendingStatusRead();
     bool ApplyRapooReport(DWORD bytes);
     bool ProbeRapooAlive();
     bool WriteOverlapped(HANDLE h, const BYTE* data, DWORD len, DWORD timeout_ms);
@@ -99,6 +100,7 @@ private:
     HANDLE m_read_event{ nullptr };
     OVERLAPPED m_ov{};
     BYTE m_read_buf[128]{};
+    bool m_status_read_pending{ false };  // status 端点上有一帧读请求正挂起
     int m_rapoo_battery{ -1 };
     bool m_rapoo_wired{ false };
     bool m_rapoo_alive{ false };
