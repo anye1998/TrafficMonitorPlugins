@@ -24,6 +24,14 @@
 #include <string>
 #include <vector>
 
+// 采集周期的默认值与允许范围（毫秒）。
+// 放在头文件里是为了让设置界面复用同一套边界，避免两处各写一份数字、改一处忘一处。
+// 默认 1000：TrafficMonitor 用 general.monitor_time_span（默认 1000ms）才调一次
+// DataRequired，状态栏窗口也是 1000ms 重绘一次，采得更快也不会让界面更及时。
+constexpr int kDefaultLoopPeriodMs = 1000;
+constexpr int kMinLoopPeriodMs = 200;
+constexpr int kMaxLoopPeriodMs = 30000;
+
 #include "MouseTypes.h"
 #include "RapooHid.h"
 #include "DeviceQuery.h"
@@ -54,6 +62,10 @@ public:
     // 当前生效的采集周期（毫秒），供设置窗口展示。
     // 来源：MouseStatus.ini 的 [config] refresh_interval_ms，缺省 1000ms。
     static int LoopPeriodMs();
+
+    // 设置采集周期：写入 ini 并让正在跑的工作线程立刻按新周期走
+    // （不重启主程序；若线程正在睡眠，会被唤醒后重新按新周期计算）
+    static bool SetLoopPeriodMs(int ms);
 
 private:
     CMouseMonitor();
@@ -144,5 +156,11 @@ private:
 
     HANDLE m_thread{ nullptr };
     HANDLE m_stop{ nullptr };
+    HANDLE m_wake{ nullptr };              // 设置界面改了周期时用它打断本轮睡眠
     bool m_running{ false };
+
+    // 采集周期（毫秒）。用 LONG + Interlocked 访问：设置界面在 UI 线程写，
+    // 工作线程每轮读，避免为了一个 int 再加一把锁。
+    // 0 表示「工作线程还没起来、尚未从 ini 读取」，此时查询要走 ini。
+    volatile LONG m_period_ms{ 0 };
 };

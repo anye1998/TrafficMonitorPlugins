@@ -2,6 +2,7 @@
 #include "OptionsDlg.h"
 
 #include <windows.h>
+#include <cstdlib>
 #include <string>
 
 #include "Diag.h"
@@ -11,7 +12,7 @@ namespace {
 
 // 客户区设计尺寸（96 DPI），实际尺寸按所在显示器的 DPI 缩放
 constexpr int kClientWidth = 440;
-constexpr int kClientHeight = 240;
+constexpr int kClientHeight = 290;
 
 const wchar_t* const kWindowClass = L"MouseStatusOptionsWindow";
 
@@ -28,6 +29,10 @@ enum : int
     IDC_EDIT_PATH,
     IDC_STATIC_SIZE,
     IDC_EDIT_INI,
+    IDC_STATIC_PERIOD,
+    IDC_EDIT_PERIOD,
+    IDC_BTN_APPLY,
+    IDC_STATIC_PERIOD_HINT,
     IDC_BTN_OPEN,
     IDC_BTN_CLEAR,
     IDC_BTN_DUMP,
@@ -41,6 +46,7 @@ struct OptionsUi
     HWND edit_path{ nullptr };
     HWND static_size{ nullptr };
     HWND edit_ini{ nullptr };
+    HWND edit_period{ nullptr };
     bool initial{ true };
     bool changed{ false };
     bool done{ false };
@@ -68,13 +74,69 @@ void RefreshSizeLabel(OptionsUi* ui)
 {
     if (ui == nullptr || ui->static_size == nullptr)
         return;
-    std::wstring text = L"当前日志大小：" + FormatSize(diag::LogFileSize());
-    // 顺带把采集周期显示出来：这个值决定「最近检查」多久跳一次，
-    // 用户可以按主程序的「监控时间间隔」在 ini 里对齐它。
-    wchar_t buf[64] = { 0 };
-    ::swprintf_s(buf, L"　｜　采集周期：%d ms", CMouseMonitor::LoopPeriodMs());
-    text += buf;
+    const std::wstring text = L"当前日志大小：" + FormatSize(diag::LogFileSize());
     ::SetWindowTextW(ui->static_size, text.c_str());
+}
+
+// 把当前生效的周期填回编辑框（用于初始化、以及输入非法时的回退）
+void FillPeriodEdit(OptionsUi* ui)
+{
+    if (ui == nullptr || ui->edit_period == nullptr)
+        return;
+    wchar_t buf[16] = { 0 };
+    ::swprintf_s(buf, L"%d", CMouseMonitor::LoopPeriodMs());
+    ::SetWindowTextW(ui->edit_period, buf);
+}
+
+// 解析编辑框里的周期；非法时返回 false
+bool ReadPeriodEdit(OptionsUi* ui, int& value)
+{
+    value = 0;
+    if (ui == nullptr || ui->edit_period == nullptr)
+        return false;
+
+    wchar_t buf[32] = { 0 };
+    ::GetWindowTextW(ui->edit_period, buf, (int)(sizeof(buf) / sizeof(buf[0])));
+    if (buf[0] == L'\0')
+        return false;
+    for (const wchar_t* p = buf; *p != L'\0'; ++p)
+    {
+        if (*p < L'0' || *p > L'9')
+            return false;
+    }
+
+    const long parsed = ::wcstol(buf, nullptr, 10);
+    if (parsed < kMinLoopPeriodMs || parsed > kMaxLoopPeriodMs)
+        return false;
+    value = (int)parsed;
+    return true;
+}
+
+// 应用编辑框里的采集周期。
+// silent = true 时不弹提示（用于「关闭」前顺手保存），非法值直接回退为当前生效值。
+bool ApplyPeriod(OptionsUi* ui, bool silent)
+{
+    int value = 0;
+    if (!ReadPeriodEdit(ui, value))
+    {
+        FillPeriodEdit(ui);   // 回退显示，避免留下一个没被采纳的数字
+        if (!silent)
+        {
+            wchar_t msg[160] = { 0 };
+            ::swprintf_s(msg,
+                L"采集周期需为 %d ~ %d 之间的整数（毫秒）。\n已恢复为当前生效值。",
+                kMinLoopPeriodMs, kMaxLoopPeriodMs);
+            ::MessageBoxW(ui->hwnd, msg, L"MouseStatus", MB_ICONWARNING | MB_OK);
+        }
+        return false;
+    }
+
+    if (value == CMouseMonitor::LoopPeriodMs())
+        return true;   // 没变就不写 ini，也不打断线程
+
+    CMouseMonitor::SetLoopPeriodMs(value);
+    ui->changed = true;
+    return true;
 }
 
 HWND MakeChild(OptionsUi* ui, const wchar_t* cls, const wchar_t* text, DWORD style, DWORD ex_style,
@@ -109,23 +171,37 @@ void CreateChildren(OptionsUi* ui)
     ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
         ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 86, inner, 24, IDC_EDIT_PATH);
 
-    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 116, inner, 16, IDC_STATIC_SIZE);
+    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 118, inner, 16, IDC_STATIC_SIZE);
     RefreshSizeLabel(ui);
+
+    // 采集周期 —— 这是本插件唯一一个会明显影响行为的设置项
+    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 151, 120, 18,
+        IDC_STATIC_PERIOD);
+    ui->edit_period = MakeChild(ui, L"EDIT", L"",
+        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 148, 72, 24, IDC_EDIT_PERIOD);
+    FillPeriodEdit(ui);
+    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 147, 56, 26,
+        IDC_BTN_APPLY);
+    {
+        wchar_t hint[64] = { 0 };
+        ::swprintf_s(hint, L"%d ~ %d", kMinLoopPeriodMs, kMaxLoopPeriodMs);
+        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 151, 140, 18, IDC_STATIC_PERIOD_HINT);
+    }
 
     // 配置文件（ini）—— 和 Battery / DateTime 等插件放在同一个目录
     MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关与采集周期保存在这里）：", SS_LEFT, 0,
-        16, 142, inner, 16, -1);
+        16, 186, inner, 16, -1);
     ui->edit_ini = MakeChild(ui, L"EDIT", diag::ConfigFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 160, inner, 24, IDC_EDIT_INI);
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 204, inner, 24, IDC_EDIT_INI);
 
     // 按钮行
-    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 196, 96, 28,
+    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 246, 96, 28,
         IDC_BTN_OPEN);
-    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 196, 96, 28,
+    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 246, 96, 28,
         IDC_BTN_CLEAR);
-    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 196, 110, 28,
+    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 246, 110, 28,
         IDC_BTN_DUMP);
-    MakeChild(ui, L"BUTTON", L"关闭", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 352, 196, 72, 28,
+    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 246, 72, 28,
         IDC_BTN_CLOSE);
 }
 
@@ -157,6 +233,17 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
             diag::SetEnabled(checked);
             ui->changed = (checked != ui->initial);
             RefreshSizeLabel(ui);
+            return 0;
+        }
+        if (id == IDC_BTN_APPLY && code == BN_CLICKED)
+        {
+            ApplyPeriod(ui, false);
+            return 0;
+        }
+        if (id == IDC_EDIT_PERIOD && code == EN_KILLFOCUS)
+        {
+            // 改完数字直接点到别处也算「我想改」——静默应用，非法值回退不打扰
+            ApplyPeriod(ui, true);
             return 0;
         }
         if (id == IDC_BTN_OPEN)
@@ -197,12 +284,16 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         }
         if (id == IDC_BTN_CLOSE)
         {
+            // 关窗口前顺手把编辑框里改过的周期存下来，免得用户改完数字直接点关闭就丢了
+            ApplyPeriod(ui, true);
             ::DestroyWindow(hwnd);
             return 0;
         }
         break;
     }
     case WM_CLOSE:
+        if (ui != nullptr)
+            ApplyPeriod(ui, true);
         ::DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
@@ -360,7 +451,9 @@ bool ShowMouseStatusOptions(void* parent)
 
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE)
         {
-            ::DestroyWindow(hwnd);
+            // 走 WM_CLOSE，和「关闭」按钮同一条路径：本窗口没有「取消」概念
+            // （日志开关点了就生效），所以 ESC 也应当把改过的周期保存下来
+            ::SendMessageW(hwnd, WM_CLOSE, 0, 0);
             continue;
         }
         if (!::IsDialogMessageW(hwnd, &msg))

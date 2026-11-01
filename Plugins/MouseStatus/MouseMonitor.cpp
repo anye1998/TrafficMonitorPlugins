@@ -27,11 +27,9 @@ constexpr ULONGLONG kStaleThresholdMs = 8000;    // 无主动探测能力时的�
 
 // 主循环周期。默认与 TrafficMonitor 的采集间隔（general.monitor_time_span，默认 1000）对齐：
 // 主程序要等 DataRequired 被调用才会来取一次数据、状态栏窗口也是 1000ms 重绘一次，
-// 采样比这更快不会让界面更及时，只是白白多耗唤醒。用户把主程序间隔调过（200~30000ms）时，
-// 可以手工在 MouseStatus.ini 里写 refresh_interval_ms 覆盖。
-constexpr int kDefaultLoopPeriodMs = 1000;
-constexpr int kMinLoopPeriodMs = 200;
-constexpr int kMaxLoopPeriodMs = 30000;
+// 采样比这更快不会让界面更及时，只是白白多耗唤醒。用户可以在设置界面里改，也可以直接写
+// MouseStatus.ini 的 refresh_interval_ms。
+// （kDefaultLoopPeriodMs / kMinLoopPeriodMs / kMaxLoopPeriodMs 定义在 MouseMonitor.h）
 
 int ResolveLoopPeriodMs()
 {
@@ -185,7 +183,8 @@ void CMouseMonitor::Start()
 
     m_stop = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_read_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    if (m_stop == nullptr || m_read_event == nullptr)
+    m_wake = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);   // 自动复位
+    if (m_stop == nullptr || m_read_event == nullptr || m_wake == nullptr)
         return;
 
     ::ZeroMemory(&m_ov, sizeof(m_ov));
@@ -219,6 +218,11 @@ void CMouseMonitor::Stop()
         ::CloseHandle(m_read_event);
         m_read_event = nullptr;
     }
+    if (m_wake != nullptr)
+    {
+        ::CloseHandle(m_wake);
+        m_wake = nullptr;
+    }
     m_ov.hEvent = nullptr;
 }
 
@@ -242,7 +246,29 @@ DWORD WINAPI CMouseMonitor::ThreadProc(LPVOID param)
 
 int CMouseMonitor::LoopPeriodMs()
 {
+    // 运行中读线程实际在用的值；线程还没起来时从 ini 取
+    const LONG cached = ::InterlockedCompareExchange((volatile LONG*)&Instance().m_period_ms, 0, 0);
+    if (cached > 0)
+        return (int)cached;
     return ResolveLoopPeriodMs();
+}
+
+bool CMouseMonitor::SetLoopPeriodMs(int ms)
+{
+    if (ms < kMinLoopPeriodMs)
+        ms = kMinLoopPeriodMs;
+    if (ms > kMaxLoopPeriodMs)
+        ms = kMaxLoopPeriodMs;
+
+    CMouseMonitor& self = Instance();
+    ::InterlockedExchange((volatile LONG*)&self.m_period_ms, (LONG)ms);
+
+    // 若线程正睡在一个长周期里，叫醒它，让新周期立刻生效（否则最坏要等 30 秒）
+    if (self.m_wake != nullptr)
+        ::SetEvent(self.m_wake);
+
+    diag::Log(L"采集周期已改为 %d ms", ms);
+    return diag::SetConfigInt(L"refresh_interval_ms", ms);
 }
 
 void CMouseMonitor::Run()
@@ -256,7 +282,8 @@ void CMouseMonitor::Run()
 
     DumpDiagnosticsOnce();
 
-    const int period_ms = ResolveLoopPeriodMs();
+    int period_ms = ResolveLoopPeriodMs();
+    ::InterlockedExchange((volatile LONG*)&m_period_ms, (LONG)period_ms);
     diag::Log(L"采集周期：%d ms（ini 键 refresh_interval_ms，默认 %d）", period_ms,
         kDefaultLoopPeriodMs);
 
@@ -273,13 +300,23 @@ void CMouseMonitor::Run()
         // 睡到下一个整周期，而不是「干完活再固定睡一段」：
         // 雷柏在线时本轮要花一两百毫秒等报文，若再叠加固定睡眠，实际周期会漂到 1.2~1.6 秒，
         // 与主程序的 1 秒采集错拍，表现为电量偶尔「跳一格又停两秒」。
+        const LONG latest = ::InterlockedCompareExchange((volatile LONG*)&m_period_ms, 0, 0);
+        if (latest > 0)
+            period_ms = (int)latest;
+
         const ULONGLONG spent = ::GetTickCount64() - round_begin;
         DWORD sleep_ms = 100;   // 兜底：本轮超时就不额外睡，留一点余量避免空转
         if (spent + 100 < (ULONGLONG)period_ms)
             sleep_ms = (DWORD)((ULONGLONG)period_ms - spent);
 
-        if (::WaitForSingleObject(m_stop, sleep_ms) == WAIT_OBJECT_0)
+        // 同时等「停止」和「周期被改」两个事件：设置界面改完周期会 SetEvent(m_wake)，
+        // 这里立刻结束本轮睡眠、按新周期重算，不必等旧的睡眠走完。
+        HANDLE waits[2] = { m_stop, m_wake };
+        const DWORD wait = ::WaitForMultipleObjects(m_wake != nullptr ? 2 : 1, waits, FALSE, sleep_ms);
+        if (wait == WAIT_OBJECT_0)
             break;
+        if (wait == WAIT_OBJECT_0 + 1)
+            ::ResetEvent(m_wake);   // 重新进入下一轮，周期由上面重新读取
     }
 
     diag::Log(L"=== MouseStatus 停止 ===");

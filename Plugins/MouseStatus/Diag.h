@@ -39,6 +39,9 @@ void SetEnabled(bool enabled);
 // 插件自己不写这些键，留给用户手工编辑 ini 调整行为。
 int GetConfigInt(const wchar_t* key, int default_value, int min_value, int max_value);
 
+// 写 ini 里 [config] 段的整数项（供设置界面保存用户改动）；成功返回 true
+bool SetConfigInt(const wchar_t* key, int value);
+
 // 删除 MouseStatus.log 与 MouseStatus.log.old，返回是否全部删干净
 bool DeleteLogFiles();
 

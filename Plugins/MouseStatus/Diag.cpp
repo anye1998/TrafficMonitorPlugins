@@ -318,6 +318,20 @@ int GetConfigInt(const wchar_t* key, int default_value, int min_value, int max_v
     return (int)value;
 }
 
+bool SetConfigInt(const wchar_t* key, int value)
+{
+    if (key == nullptr)
+        return false;
+
+    const std::wstring ini = ConfigFilePath();
+    if (ini.empty())
+        return false;
+
+    wchar_t buf[32] = { 0 };
+    ::swprintf_s(buf, L"%d", value);
+    return ::WritePrivateProfileStringW(kIniSection, key, buf, ini.c_str()) != FALSE;
+}
+
 bool Enabled()
 {
     DiagState& st = State();
