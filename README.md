@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.2)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.3)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,15 +117,15 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.2**，
-下载：[MouseStatus V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.2)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.3**，
+下载：[MouseStatus V1.0.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.3)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
 | 显示项 | 类型 | 显示内容 |
 |---|---|---|
 | 鼠标电量 | 文本 | `85%`；设备在线但读不到电量时 `?`；完全没检测到设备时 `--` |
-| 鼠标连接方式 | 文本 | `蓝牙` / `2.4G` / `USB`；未连接时 `--` |
+| 鼠标连接方式 | 文本 | `蓝牙` / `2.4G` / `USB`；未连接时 `--`。雷柏按 PID 前缀判定（`0x46xx` 为插线直连、`0x14xx` 为 2.4G 接收器），不采信厂商报文里的模式位 |
 | 鼠标充电状态 | 文本 | `充电中` / `已充满` / `放电中`；无电量可判时同电量项 |
 | 鼠标状态 | 自绘 | 电池图标（低电量转红、供电转绿）+ 电量 + 连接方式 |
 
@@ -134,6 +134,25 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 右键 →「显示设置」里勾选上面几个项目（四个显示项可以自由取舍、排序）。
 
 鼠标提示（tooltip）里还会给出设备名、数据来源、最后一次读数时间和**诊断日志路径**。
+
+### 设置（V1.0.3 新增）
+
+在显示项上**右键**，菜单里会出现四条插件命令：
+
+| 命令 | 说明 |
+|---|---|
+| 启用诊断日志 | 勾选项，切换日志开关（状态会记住） |
+| 清空诊断日志 | 一键删除 `MouseStatus.log`（含滚转出来的 `.old`） |
+| 打开日志文件夹 | 用资源管理器打开 `%LOCALAPPDATA%\MouseStatus` |
+| 立即写入诊断信息 | 把当前 HID 接口清单、雷柏端点、蓝牙电量一次性写进日志（日志关着会自动打开） |
+
+菜单里的「插件设置」会打开一个设置对话框，里面是同样的功能：日志开关、日志路径、
+当前文件大小、打开文件夹、清空日志、立即写入诊断。
+
+日志开关持久化在注册表 `HKEY_CURRENT_USER\Software\MouseStatus` 的 `EnableLog`
+（DWORD，1 开 / 0 关）。另外环境变量 `MOUSESTATUS_NOLOG=1` 可以强制关闭，优先级最高。
+
+> 关闭日志后插件不再写任何文件；恢复默认只需重新勾选一次。
 
 ### 数据来源（按优先级自动选择）
 
@@ -232,6 +251,7 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.2** | 修复雷柏端点选错集合：改为按 Usage `0x0002` 精确选取状态通道（原先会挑中 33 字节的配置/升级通道，一个状态报文都收不到），状态读请求改为跨轮次挂起避免漏帧 |
+| **V1.0.3** | 连接方式改由 PID 前缀判定（VT3 在 2.4G 下报文里也有 `0x10`，旧版据此误判成「USB 有线 / 充电中」）；新增日志开关与「清空日志」设置项 |
+| V1.0.2 | 修复雷柏端点选错集合：改为按 Usage `0x0002` 精确选取状态通道（原先会挑中 33 字节的配置/升级通道，一个状态报文都收不到），状态读请求改为跨轮次挂起避免漏帧 |
 | V1.0.1 | 修复「雷柏私有协议认出设备后短路后备链路」导致电量恒为未知；通用 HID 扫描不再跳过雷柏 VID；活性探测不再把空特性报文当作在线；新增诊断日志与 `?` / `--` 区分 |
 | V1.0.0 | 首个版本 |
