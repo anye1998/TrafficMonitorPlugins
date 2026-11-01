@@ -34,6 +34,7 @@ struct SourceResult
     bool valid{ false };                      // 该源是否认为设备在线
     LinkKind link{ LinkKind::None };
     int battery{ -1 };                        // -1 = 该源在线但没拿到电量
+    bool charging{ false };                   // 设备自报「正在充电」（目前只有雷柏私有报文有）
     std::wstring name;
     DataSource source{ DataSource::None };
 };
@@ -78,7 +79,8 @@ private:
 
     void ScanHidCandidates();
 
-    void Publish(LinkKind link, int battery, DataSource source, const std::wstring& name);
+    void Publish(LinkKind link, int battery, DataSource source, const std::wstring& name,
+        bool charging);
     void PublishOffline();
 
     struct HidCandidate
@@ -102,6 +104,7 @@ private:
     BYTE m_read_buf[128]{};
     bool m_status_read_pending{ false };  // status 端点上有一帧读请求正挂起
     int m_rapoo_battery{ -1 };
+    bool m_rapoo_charging{ false };
     bool m_rapoo_alive{ false };
     ULONGLONG m_rapoo_report_tick{ 0 };
     ULONGLONG m_rapoo_probe_tick{ 0 };

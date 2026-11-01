@@ -220,6 +220,15 @@ bool ParseStatus(const BYTE* buf, DWORD len, Status& out)
     // 连接方式改由「设备节点的 PID 前缀」判定（0x46xx = 插线直连，0x14xx = 2.4G 接收器），
     // 这是系统枚举层面的事实，不依赖厂商字节语义。这里只把原始值留给日志。
     out.mode_nibble = (BYTE)(buf[1] & 0xF0);
+    out.status_byte = buf[7];
+
+    // buf[7] 的 bit1 表示「正在充电」。VT3 真机对照（插线 31 秒再拔掉）：
+    //   常态 0x01 -> 插线 0x02（持续整个充电过程）-> 拔线先回落 0x01、短暂 0x00、再稳定 0x01
+    // 整个插拔过程中报文里只有 buf[7] 和 buf[8]（电量）发生变化，可以确定 bit1 就是充电位。
+    // 参考项目这一条是对的，它错在另外半句：把「模式位 0x10」当成有线并直接推出充电中，
+    // 而 VT3 在纯 2.4G 下模式位同样是 0x10，于是永远显示充电中。
+    out.charging = (buf[7] & 0x02) != 0;
+
     out.dpi = (int)buf[3] | ((int)buf[4] << 8);
 
     const BYTE raw = buf[8];

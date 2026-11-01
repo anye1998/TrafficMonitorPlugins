@@ -79,17 +79,22 @@ const wchar_t* TransportText(HidTransport t)
     return L"未知";
 }
 
-// 充电状态只由「连接方式 + 电量」推导：
-//   有线且未满 -> 充电中；有线且满 -> 已充满；无线 -> 放电中
-ChargeKind DeriveCharge(LinkKind link, int battery)
+// 充电状态由「设备自报的充电位 + 连接方式 + 电量」推导：
+//   设备说在充电（或 USB 有线直连，必然有供电） -> 满则「已充满」，否则「充电中」
+//   否则（2.4G / 蓝牙）                            -> 「放电中」
+// 注意：优先采信设备自报的充电位。雷柏私有报文的 buf[7] bit1 就是充电位，
+// 这样「2.4G 连接 + 插着充电线」也能正确显示充电中，而不是被连接方式一票否决。
+ChargeKind DeriveCharge(LinkKind link, int battery, bool charging)
 {
     if (battery < 0)
         return ChargeKind::Unknown;
 
+    const bool on_power = charging || (link == LinkKind::UsbWired);
+    if (on_power)
+        return (battery >= 100) ? ChargeKind::Full : ChargeKind::Charging;
+
     switch (link)
     {
-    case LinkKind::UsbWired:
-        return (battery >= 100) ? ChargeKind::Full : ChargeKind::Charging;
     case LinkKind::Wireless24G:
     case LinkKind::Bluetooth:
     case LinkKind::BluetoothLE:
@@ -268,13 +273,13 @@ void CMouseMonitor::Compose(const SourceResult& rapoo, const SourceResult& hid,
     if (with_battery != nullptr)
     {
         Publish(with_battery->link, with_battery->battery, with_battery->source,
-            with_battery->name);
+            with_battery->name, with_battery->charging);
         return;
     }
     if (any_valid != nullptr)
     {
         // 设备在线，但没有任何来源能给出电量
-        Publish(any_valid->link, -1, any_valid->source, any_valid->name);
+        Publish(any_valid->link, -1, any_valid->source, any_valid->name, any_valid->charging);
         return;
     }
     PublishOffline();
@@ -414,6 +419,9 @@ bool CMouseMonitor::OpenRapooHandles()
 void CMouseMonitor::CloseRapooHandles()
 {
     CancelPendingStatusRead();
+    // 充电位代表「此刻正在充电」，断连后不能沿用上一次的值，
+    // 否则鼠标收进抽屉里还一直显示「充电中」。
+    m_rapoo_charging = false;
     if (m_h_status != INVALID_HANDLE_VALUE)
     {
         ::CloseHandle(m_h_status);
@@ -480,6 +488,7 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
     // VT3 在 2.4G 下 buf[1] 高 4 位仍是 0x10，照搬会把无线误判成有线。
     if (status.battery >= 0)
         m_rapoo_battery = status.battery;
+    m_rapoo_charging = status.charging;
 
     // 原始报文记录策略：
     //   - 进程启动后先无条件记 m_report_dump_budget 帧，便于开机即看格式；
@@ -501,10 +510,11 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
             --m_report_dump_budget;
 
         // buf7 / buf9 是参考实现里用来判充电的两个字节，单独打出来方便比对插拔前后的差异
-        diag::Log(L"雷柏状态报文 battery=%d mode=%02X dpi=%d buf7=%02X buf9=%02X bytes=%lu"
+        diag::Log(L"雷柏状态报文 battery=%d mode=%02X dpi=%d buf7=%02X(%s) buf9=%02X bytes=%lu"
                   L"（link 由 PID 判定=%s）%s",
             status.battery, (unsigned)status.mode_nibble, status.dpi,
-            (unsigned)m_read_buf[7], (unsigned)m_read_buf[9], bytes,
+            (unsigned)m_read_buf[7], status.charging ? L"充电中" : L"未充电",
+            (unsigned)m_read_buf[9], bytes,
             m_ep.pid_wired ? L"USB有线" : L"2.4G", content_changed ? L" [内容变化]" : L"");
         diag::LogHex(L"  原始字节:", m_read_buf, bytes);
 
@@ -705,6 +715,8 @@ SourceResult CMouseMonitor::PollRapoo()
     // 连接方式只看系统枚举事实：PID 0x46xx = 鼠标插线直连，0x14xx = 2.4G 接收器
     result.link = m_ep.pid_wired ? LinkKind::UsbWired : LinkKind::Wireless24G;
     result.battery = m_rapoo_battery;
+    // 「2.4G 连接 + 插着充电线」也能被正确识别，靠的就是设备自报的充电位
+    result.charging = m_rapoo_charging;
     return result;
 }
 
@@ -875,7 +887,7 @@ SourceResult CMouseMonitor::PollBluetooth()
 /////////////////////////////////////////////////////////////////////////////////////////////
 
 void CMouseMonitor::Publish(LinkKind link, int battery, DataSource source,
-    const std::wstring& name)
+    const std::wstring& name, bool charging)
 {
     if (!m_cs_ready)
         return;
@@ -898,7 +910,7 @@ void CMouseMonitor::Publish(LinkKind link, int battery, DataSource source,
     m_snapshot.live = true;
     if (!name.empty())
         m_snapshot.device_name = name;
-    m_snapshot.charge = DeriveCharge(link, m_snapshot.battery);
+    m_snapshot.charge = DeriveCharge(link, m_snapshot.battery, charging);
 
     signature = std::to_wstring((int)link);
     signature += L"|";

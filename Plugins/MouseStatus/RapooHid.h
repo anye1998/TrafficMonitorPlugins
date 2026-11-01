@@ -50,7 +50,9 @@ struct Endpoints
 struct Status
 {
     int battery{ -1 };      // -1 表示本次报文里的电量读数无效
+    bool charging{ false }; // 是否正在充电（buf[7] 的 bit1）
     BYTE mode_nibble{ 0 };  // 报文 buf[1] & 0xF0 的原始值，仅用于日志
+    BYTE status_byte{ 0 };  // 报文 buf[7] 原值，仅用于日志
     int dpi{ 0 };
 };
 
