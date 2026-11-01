@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.3)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.4](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.4)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.3**，
-下载：[MouseStatus V1.0.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.3)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.4**，
+下载：[MouseStatus V1.0.4](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.4)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -251,7 +251,8 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.3** | 连接方式改由 PID 前缀判定（VT3 在 2.4G 下报文里也有 `0x10`，旧版据此误判成「USB 有线 / 充电中」）；新增日志开关与「清空日志」设置项 |
+| **V1.0.4** | 原始报文记录改为「启动记 20 帧 + 内容变化即记 + 30 秒心跳」，不再按进程生命周期截断；日志行补 `buf7` / `buf9`，便于比对插拔充电线前后的字节差异 |
+| V1.0.3 | 连接方式改由 PID 前缀判定（VT3 在 2.4G 下报文里也有 `0x10`，旧版据此误判成「USB 有线 / 充电中」）；新增日志开关与「清空日志」设置项 |
 | V1.0.2 | 修复雷柏端点选错集合：改为按 Usage `0x0002` 精确选取状态通道（原先会挑中 33 字节的配置/升级通道，一个状态报文都收不到），状态读请求改为跨轮次挂起避免漏帧 |
 | V1.0.1 | 修复「雷柏私有协议认出设备后短路后备链路」导致电量恒为未知；通用 HID 扫描不再跳过雷柏 VID；活性探测不再把空特性报文当作在线；新增诊断日志与 `?` / `--` 区分 |
 | V1.0.0 | 首个版本 |
