@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.6](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.6)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.7](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.7)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.6**，
-下载：[MouseStatus V1.0.6](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.6)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.7**，
+下载：[MouseStatus V1.0.7](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.7)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -177,6 +177,17 @@ UUID 判定**的（`00001124` = 经典蓝牙、`00001812` = 低功耗蓝牙）�
 只要雷柏私有协议认出了设备就直接返回，另外两条后备链路被跳过，于是当私有报文里没有有效
 电量时，明明能读到数字的通用 HID 也被挡住了 —— 表现就是**电量永远显示未知**。1.0.1 改成汇总。
 
+**「鼠标在不在」和「电量读不读得到」是两个独立的问题**（V1.0.7 起）。只要枚举到一个
+外接鼠标的 HID 集合，就算设备在线、连接方式照常显示，电量读不到就显示 `?`。
+判定「外接」的规则是：
+
+- 走蓝牙（BR/EDR 或 GATT）的鼠标集合 —— 一律算；
+- 走 USB / 2.4G 的，路径里必须有 VID/PID —— 笔记本内置触摸板走 I2C-HID，
+  路径里没有 VID/PID 段，据此排除，不会把触摸板当成"鼠标一直在线"。
+
+早先只把「暴露了标准 Battery Strength 的接口」当成候选，于是很多只上报厂商自定义集合的
+蓝牙鼠标连"在线"都算不上，状态栏一直是 `--`。
+
 ### 读不到电量时怎么排查（V1.0.1 新增）
 
 先看状态栏显示的是哪一种：
@@ -197,7 +208,9 @@ UUID 判定**的（`00001124` = 经典蓝牙、`00001812` = 低功耗蓝牙）�
 |---|---|---|
 | 所有条目都是 `hasBattery=0`，且 `FindEndpoints=0` | 设备没有向系统暴露任何标准电量 | 这种情况插件拿不到数字，只能靠厂商软件 |
 | `FindEndpoints=1` 但一直是 `battery=-1` | 雷柏私有报文里电量字段为 0，或该型号格式不同 | 把日志里的「原始字节」发出来即可适配 |
-| `带电量属性的蓝牙节点数：0` | Windows 还没缓存该设备电量 | 在「设置 → 蓝牙和设备」里连接并使用一次，等系统刷新后再看 |
+| `在线蓝牙设备节点数：N` 但 `hasBattery=0` | Windows 没为该设备缓存电量（设置页里也看不到百分比） | 用一次鼠标让系统刷新；仍没有则该设备不通过 GATT 电池服务报电量 |
+| `在线蓝牙设备节点数：0` | 没有任何在线蓝牙设备节点 | 确认鼠标确实处于连接状态（蓝牙设置里显示「已连接」） |
+| `外接鼠标接口数：0`，但鼠标明明在用 | 该鼠标的集合没有被判定为外接鼠标 | 把「HID 接口清单」整段发出来，按实际路径补规则 |
 | `HID 接口总数：0` | HID 枚举被拦或驱动异常 | 检查安全软件 |
 | 日志文件根本不存在 | 插件没被加载 | 见下面「先确认插件真的加载了」 |
 
@@ -261,7 +274,8 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.6** | 设置项改用 `plugins\MouseStatus.ini` 保存（与其它插件统一），不再写注册表；升级时自动迁移旧值并清理注册表残留；设置窗口改为按显示器工作区居中，不再跑到屏幕最下方/屏幕外 |
+| **V1.0.7** | 修复蓝牙鼠标「检测不到」：在线判定与电量读取解耦，只要枚举到外接鼠标的 HID 集合就算在线（不再要求它暴露标准电池用途）；笔记本内置触摸板按「I2C-HID 无 VID/PID」排除；日志新增鼠标接口小节与蓝牙 feature 报文 dump |
+| V1.0.6 | 设置项改用 `plugins\MouseStatus.ini` 保存（与其它插件统一），不再写注册表；升级时自动迁移旧值并清理注册表残留；设置窗口改为按显示器工作区居中，不再跑到屏幕最下方/屏幕外 |
 | V1.0.5 | 按真机报文解析出充电标志位（`buf[7]` 的 bit1），「2.4G 连接 + 插着充电线」现在能正确显示 `充电中`；断连时清空充电位 |
 | V1.0.4 | 原始报文记录改为「启动记 20 帧 + 内容变化即记 + 30 秒心跳」，不再按进程生命周期截断；日志行补 `buf7` / `buf9`，便于比对插拔充电线前后的字节差异 |
 | V1.0.3 | 连接方式改由 PID 前缀判定（VT3 在 2.4G 下报文里也有 `0x10`，旧版据此误判成「USB 有线 / 充电中」）；新增日志开关与「清空日志」设置项 |
