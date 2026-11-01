@@ -95,6 +95,10 @@ jobs:
     runs-on: ubuntu-latest
     name: Publish release
     steps:
+      # 必须 checkout：发布说明文件（.github/release-notes/<tag>.md）就在仓库里，
+      # 不 checkout 的话工作目录是空的，下面的 [ -f "$notes" ] 永远为假。
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
