@@ -326,7 +326,7 @@ Displays the battery level and link type of a wireless or Bluetooth mouse on the
 * Version: V1.00
 * Author: [anye1998](https://github.com/anye1998)
 * Homepage: [anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins)
-* Download url: [MouseStatus_V1.0.12 · anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.12)
+* Download url: [MouseStatus_V1.0.13 · anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.13)
 
 Note: this plugin is maintained in this fork only; there is no matching entry in the upstream `zhongyang219/TrafficMonitorPlugins`. Implementation details: [README](../README.md#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式).
 

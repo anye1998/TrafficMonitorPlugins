@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.12](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.12)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.13](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.13)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.12**，
-下载：[MouseStatus V1.0.12](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.12)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.13**，
+下载：[MouseStatus V1.0.13](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.13)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -298,6 +298,12 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 - 通用路径依赖设备自身暴露 HID 电池用途，或 Windows 已缓存其蓝牙电量；两者都没有的设备会显示 `?`
   （V1.0.0 及更早版本在这种情况下显示 `--`，容易和「没插设备」混淆，所以改了）。
 - 鼠标休眠 / 关机时，电量保留最后一次真实读数，连接方式显示为 `--`（未连接），鼠标提示里会标注读数时间。
+- **蓝牙鼠标的「是否已连接」取自蓝牙栈的 `BLUETOOTH_DEVICE_INFO::fConnected`**，不是「PnP 节点是否存在」。
+  这一点很关键：`BTHLE\DEV_xxx` 节点在设备关机后**不会从系统里消失**（Windows 会保留已配对设备的
+  devnode 与电量缓存，就是「设置」里显示「已配对」的那种状态），单看节点会把关机误判成在线。
+  查不到连接状态时（没有适配器、bthserv 未启动、地址没匹配上）才退回「HID 接口是否还在」这个判据。
+- 如果连系统自己都认为设备还连着（「设置 → 蓝牙和设备」里显示「已连接」），插件也会跟着显示在线 ——
+  那种情况属于系统层面尚未察觉断开，插件没有更可靠的信息源。
 
 ### 已实测适配的设备
 
@@ -320,7 +326,8 @@ le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.12** | 采集周期做进设置界面（可编辑 + 应用按钮，改完立即生效，通过事件唤醒工作线程而不必等旧周期走完） |
+| **V1.0.13** | 修复蓝牙鼠标关机后仍显示「已连接」：蓝牙 PnP 节点在设备关机后不会消失，旧版把「节点存在」当成「已连接」；改为查 `BLUETOOTH_DEVICE_INFO::fConnected`，查不到时回退到「HID 接口是否还在」 |
+| V1.0.12 | 采集周期做进设置界面（可编辑 + 应用按钮，改完立即生效，通过事件唤醒工作线程而不必等旧周期走完） |
 | V1.0.11 | 采集周期 400ms → 1000ms（对齐主程序的 `monitor_time_span` 与状态栏重绘），并改为「睡到整周期」避免雷柏等报文把周期拖到 1.2~1.6s；周期可在 ini 的 `refresh_interval_ms` 调整 |
 | V1.0.10 | 鼠标提示拆成「读数更新于」（数值变化时刻）与「最近检查」（插件轮询时刻），不再让每秒跳动的时间冒充数据新鲜度 |
 | V1.0.9 | 鼠标提示标注蓝牙电量来自「系统缓存值」；README 修正雷柏充电状态说明、补充已实测适配设备（华为 CD20）与蓝牙电量刷新机制 |
