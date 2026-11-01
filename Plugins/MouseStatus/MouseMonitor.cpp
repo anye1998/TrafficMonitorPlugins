@@ -322,6 +322,10 @@ void CMouseMonitor::DumpDiagnosticsOnce()
         diag::Log(L"  提示：若鼠标确实通过蓝牙连接却没有条目，说明 Windows 没有为该设备缓存电量");
     }
     diag::Log(L"--- 诊断结束 ---");
+
+    // 用户按下「立即写入诊断信息」时，顺带重置报文记录预算：
+    // 接下来 20 帧（约 1 分钟）的雷柏报文会被完整写进日志，方便复现插拔充电线这类操作。
+    m_report_dump_budget = 20;
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -463,9 +467,9 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
     rapoo::Status status;
     if (!rapoo::ParseStatus(m_read_buf, bytes, status))
     {
-        if (m_rapoo_report_log_count < 12)
+        if (m_bad_report_log_count < 12)
         {
-            ++m_rapoo_report_log_count;
+            ++m_bad_report_log_count;
             diag::LogHex(L"无法解析的雷柏报文（已忽略）:", m_read_buf, bytes);
         }
         return false;
@@ -477,13 +481,38 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
     if (status.battery >= 0)
         m_rapoo_battery = status.battery;
 
-    if (m_rapoo_report_log_count < 12)
+    // 原始报文记录策略：
+    //   - 进程启动后先无条件记 m_report_dump_budget 帧，便于开机即看格式；
+    //   - 之后只在「报文内容变化」时再记一帧。
+    // 早先的版本只记「前 12 帧」就永久停止，结果排查「插拔充电线」这类事件时，
+    // 等用户操作完预算早就用光了，关键的那几帧一条都没留下。
+    // 末尾字节（buf[18]）在常量报文上也会跳动，疑似计数/校验，比较时排除它。
+    const int cmp_len = (bytes > 1) ? (int)bytes - 1 : (int)bytes;
+    const bool content_changed = (m_last_dumped_len != (int)bytes)
+        || (std::memcmp(m_last_dumped, m_read_buf, (size_t)cmp_len) != 0);
+    const ULONGLONG now = ::GetTickCount64();
+    const bool too_soon = (m_last_dumped_tick != 0) && (now - m_last_dumped_tick < 300);
+
+    if ((content_changed || m_report_dump_budget > 0) && !too_soon)
     {
-        ++m_rapoo_report_log_count;
-        diag::Log(L"雷柏状态报文 battery=%d mode=%02X dpi=%d bytes=%lu（link 由 PID 判定=%s）",
-            status.battery, (unsigned)status.mode_nibble, status.dpi, bytes,
-            m_ep.pid_wired ? L"USB有线" : L"2.4G");
+        if (m_report_dump_budget > 0)
+            --m_report_dump_budget;
+
+        // buf7 / buf9 是参考实现里用来判充电的两个字节，单独打出来方便比对插拔前后的差异
+        diag::Log(L"雷柏状态报文 battery=%d mode=%02X dpi=%d buf7=%02X buf9=%02X bytes=%lu"
+                  L"（link 由 PID 判定=%s）%s",
+            status.battery, (unsigned)status.mode_nibble, status.dpi,
+            (unsigned)m_read_buf[7], (unsigned)m_read_buf[9], bytes,
+            m_ep.pid_wired ? L"USB有线" : L"2.4G", content_changed ? L" [内容变化]" : L"");
         diag::LogHex(L"  原始字节:", m_read_buf, bytes);
+
+        const int copy_len = (int)bytes;
+        if (copy_len > 0 && copy_len <= (int)sizeof(m_last_dumped))
+        {
+            std::memcpy(m_last_dumped, m_read_buf, (size_t)copy_len);
+            m_last_dumped_len = copy_len;
+        }
+        m_last_dumped_tick = now;
     }
     return true;
 }

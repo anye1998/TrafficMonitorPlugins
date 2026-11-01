@@ -105,7 +105,14 @@ private:
     bool m_rapoo_alive{ false };
     ULONGLONG m_rapoo_report_tick{ 0 };
     ULONGLONG m_rapoo_probe_tick{ 0 };
-    int m_rapoo_report_log_count{ 0 };   // 原始报文只记前若干帧，避免刷爆日志
+    // 原始报文记录策略：进程启动后先记若干帧；之后只要报文内容变了就记一帧。
+    // 不能只按「前 N 帧」截断——排查插拔充电这种事件时，等用户操作完，
+    // 前 N 帧早用完了，正好错过关键的那几帧。
+    int m_report_dump_budget{ 20 };      // 剩余「无条件记录」的帧数
+    int m_bad_report_log_count{ 0 };     // 无法解析的报文只记前几帧
+    BYTE m_last_dumped[64]{};
+    int m_last_dumped_len{ 0 };
+    ULONGLONG m_last_dumped_tick{ 0 };
 
     // 通用 HID
     std::vector<HidCandidate> m_candidates;
