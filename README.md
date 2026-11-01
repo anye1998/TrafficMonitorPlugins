@@ -14,7 +14,7 @@
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
 > - **下载编译好的插件 —— [MouseStatus V1.0.0](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.0)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
-> - [`MouseStatus` 插件说明](#mousestatus-插件状态栏显示鼠标电量与连接方式)
+> - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
 
 ## 插件下载
