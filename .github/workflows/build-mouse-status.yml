@@ -52,9 +52,13 @@ jobs:
           Write-Host "DLL: $($item.FullName)  $($item.Length) bytes"
           if ($item.Length -lt 20KB) { throw "dll looks too small ($($item.Length) bytes)" }
 
-          # 1) 必须导出 TMPluginGetInstance
-          $exports = & dumpbin /exports $dll | Out-String
-          if ($exports -notmatch 'TMPluginGetInstance') { throw "TMPluginGetInstance is not exported" }
+          # 1) 必须导出 TMPluginGetInstance（导出名以 ASCII 形式存在于导出表中）
+          #    这里不用 dumpbin：setup-msbuild 只把 msbuild 加进 PATH，dumpbin 不保证可用
+          $bytes = [System.IO.File]::ReadAllBytes($dll)
+          $ascii = [System.Text.Encoding]::ASCII.GetString($bytes)
+          if (-not $ascii.Contains('TMPluginGetInstance')) {
+            throw "TMPluginGetInstance is not exported"
+          }
           Write-Host "OK: TMPluginGetInstance exported"
 
           # 2) 文件版本必须与 GetInfo(TMI_VERSION) 一致

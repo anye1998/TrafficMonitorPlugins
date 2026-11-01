@@ -134,27 +134,24 @@ int ScaleToPercent(ULONG raw, const HIDP_VALUE_CAPS& cap)
 }
 
 // 在给定报文类型里找 Battery Strength 能力
-bool FindBatteryCap(PHIDP_PREPARSED_DATA pp, HIDP_REPORT_TYPE type, USHORT count,
-    HIDP_VALUE_CAPS& out)
+//
+// 用 HidP_GetSpecificValueCaps 直接把 Usage Page / Usage 作为筛选条件，避免自己去翻
+// HIDP_VALUE_CAPS 里的联合体（不同 SDK 版本里的成员名不一样，踩过一次坑）。
+bool FindBatteryCap(PHIDP_PREPARSED_DATA pp, HIDP_REPORT_TYPE type, HIDP_VALUE_CAPS& out)
 {
-    if (count == 0)
+    HIDP_VALUE_CAPS caps[4];
+    ::ZeroMemory(caps, sizeof(caps));
+    USHORT length = (USHORT)(sizeof(caps) / sizeof(caps[0]));
+
+    const NTSTATUS status = ::HidP_GetSpecificValueCaps(type, kUsagePageGeneric, 0,
+        kUsageBatteryStrength, caps, &length, pp);
+    if (status != HIDP_STATUS_SUCCESS && status != HIDP_STATUS_BUFFER_TOO_SMALL)
         return false;
-    std::vector<HIDP_VALUE_CAPS> caps(count);
-    USHORT length = count;   // 以「结构个数」为单位
-    if (::HidP_GetValueCaps(type, caps.data(), &length, pp) != HIDP_STATUS_SUCCESS)
+    if (length == 0)
         return false;
 
-    for (USHORT i = 0; i < length && i < count; ++i)
-    {
-        // HIDP_VALUE_CAPS 把用途放在联合体 u 里：单用途时 u.Usage（与 u.UsageMin 同址）
-        if (caps[i].UsagePage == kUsagePageGeneric && caps[i].IsRange == 0
-            && caps[i].u.UsageMin == kUsageBatteryStrength)
-        {
-            out = caps[i];
-            return true;
-        }
-    }
-    return false;
+    out = caps[0];
+    return true;
 }
 
 std::wstring ReadProductString(HANDLE h)
@@ -271,7 +268,7 @@ bool ProbeHidInterface(const std::wstring& path, HidProbeResult& out)
 
         // 优先特性报文：主机主动读取，不占用鼠标的输入通道
         if (caps.FeatureReportByteLength > 0
-            && FindBatteryCap(pp, HidP_Feature, caps.NumberFeatureValueCaps, cap))
+            && FindBatteryCap(pp, HidP_Feature, cap))
         {
             out.has_battery_usage = true;
             std::vector<BYTE> buf((size_t)caps.FeatureReportByteLength, 0);
@@ -290,7 +287,7 @@ bool ProbeHidInterface(const std::wstring& path, HidProbeResult& out)
 
         // 退而求其次：输入报文（用 GET_REPORT 取，避免抢占鼠标的输入通道）
         if (out.battery_percent < 0 && caps.InputReportByteLength > 0
-            && FindBatteryCap(pp, HidP_Input, caps.NumberInputValueCaps, cap))
+            && FindBatteryCap(pp, HidP_Input, cap))
         {
             out.has_battery_usage = true;
             std::vector<BYTE> buf((size_t)caps.InputReportByteLength, 0);
