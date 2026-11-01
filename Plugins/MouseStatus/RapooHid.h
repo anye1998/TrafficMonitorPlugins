@@ -49,8 +49,8 @@ struct Endpoints
 // 一次被动上报解析出的字段
 struct Status
 {
-    int battery{ -1 };  // -1 表示本次报文里的电量读数无效
-    bool wired{ false };
+    int battery{ -1 };      // -1 表示本次报文里的电量读数无效
+    BYTE mode_nibble{ 0 };  // 报文 buf[1] & 0xF0 的原始值，仅用于日志
     int dpi{ 0 };
 };
 

@@ -340,7 +340,6 @@ bool CMouseMonitor::EnsureRapoo()
     m_ep_valid = rapoo::FindEndpoints(m_ep);
     if (m_ep_valid)
     {
-        m_rapoo_wired = m_ep.pid_wired;
         diag::Log(L"雷柏端点已绑定 pid=%s wired=%d statusLen=%d control=%d feature=%d",
             m_ep.pid.c_str(), m_ep.pid_wired ? 1 : 0, m_ep.status_report_len,
             m_ep.control_path.empty() ? 0 : 1, m_ep.feature_path.empty() ? 0 : 1);
@@ -473,15 +472,17 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
     }
 
     m_rapoo_report_tick = ::GetTickCount64();
-    m_rapoo_wired = status.wired;
+    // 连接方式保持由 PID 前缀决定（EnsureRapoo 里设置），不采纳报文里的模式位：
+    // VT3 在 2.4G 下 buf[1] 高 4 位仍是 0x10，照搬会把无线误判成有线。
     if (status.battery >= 0)
         m_rapoo_battery = status.battery;
 
     if (m_rapoo_report_log_count < 12)
     {
         ++m_rapoo_report_log_count;
-        diag::Log(L"雷柏状态报文 battery=%d wired=%d dpi=%d bytes=%lu", status.battery,
-            status.wired ? 1 : 0, status.dpi, bytes);
+        diag::Log(L"雷柏状态报文 battery=%d mode=%02X dpi=%d bytes=%lu（link 由 PID 判定=%s）",
+            status.battery, (unsigned)status.mode_nibble, status.dpi, bytes,
+            m_ep.pid_wired ? L"USB有线" : L"2.4G");
         diag::LogHex(L"  原始字节:", m_read_buf, bytes);
     }
     return true;
@@ -670,7 +671,8 @@ SourceResult CMouseMonitor::PollRapoo()
         result.name = L"Rapoo";
 
     result.valid = true;
-    result.link = m_rapoo_wired ? LinkKind::UsbWired : LinkKind::Wireless24G;
+    // 连接方式只看系统枚举事实：PID 0x46xx = 鼠标插线直连，0x14xx = 2.4G 接收器
+    result.link = m_ep.pid_wired ? LinkKind::UsbWired : LinkKind::Wireless24G;
     result.battery = m_rapoo_battery;
     return result;
 }
@@ -742,10 +744,21 @@ void CMouseMonitor::ScanHidCandidates()
         m_candidates.push_back(candidate);
     }
 
-    diag::Log(L"通用 HID 电量候选设备数：%u", (unsigned)m_candidates.size());
+    // 每 8 秒扫一次，清单没变化就不重复写日志，避免长期开着日志把文件刷大
+    std::wstring sig;
     for (const auto& c : m_candidates)
-        diag::Log(L"  候选 vid=%04X pid=%04X transport=%s name=\"%s\"", c.vid, c.pid,
-            TransportText(c.transport), c.product.c_str());
+    {
+        sig += c.path;
+        sig += L'|';
+    }
+    if (sig != m_hid_scan_sig)
+    {
+        m_hid_scan_sig = sig;
+        diag::Log(L"通用 HID 电量候选设备数：%u（清单有变化）", (unsigned)m_candidates.size());
+        for (const auto& c : m_candidates)
+            diag::Log(L"  候选 vid=%04X pid=%04X transport=%s name=\"%s\"", (unsigned)c.vid,
+                (unsigned)c.pid, TransportText(c.transport), c.product.c_str());
+    }
 }
 
 SourceResult CMouseMonitor::PollHidBattery()
@@ -795,10 +808,23 @@ SourceResult CMouseMonitor::PollBluetooth()
     {
         m_bt_scan_tick = now;
         m_bt_entries = QueryBluetoothBatteries();
-        diag::Log(L"蓝牙电量条目数：%u", (unsigned)m_bt_entries.size());
+
+        std::wstring sig;
         for (const auto& e : m_bt_entries)
-            diag::Log(L"  le=%d battery=%d isMouse=%d name=\"%s\"", e.le ? 1 : 0, e.percent,
-                e.is_mouse ? 1 : 0, e.name.c_str());
+        {
+            sig += e.instance_id;
+            sig += L'|';
+            sig += std::to_wstring(e.percent);
+            sig += L'|';
+        }
+        if (sig != m_bt_scan_sig)
+        {
+            m_bt_scan_sig = sig;
+            diag::Log(L"蓝牙电量条目数：%u（清单有变化）", (unsigned)m_bt_entries.size());
+            for (const auto& e : m_bt_entries)
+                diag::Log(L"  le=%d battery=%d isMouse=%d name=\"%s\"", e.le ? 1 : 0,
+                    e.percent, e.is_mouse ? 1 : 0, e.name.c_str());
+        }
     }
 
     for (const auto& entry : m_bt_entries)

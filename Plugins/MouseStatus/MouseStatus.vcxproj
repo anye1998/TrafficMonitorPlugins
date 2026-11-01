@@ -110,6 +110,7 @@
     <ClInclude Include="Diag.h" />
     <ClInclude Include="MouseMonitor.h" />
     <ClInclude Include="MouseStatus.h" />
+    <ClInclude Include="OptionsDlg.h" />
     <ClInclude Include="MouseStatusItem.h" />
     <ClInclude Include="MouseTypes.h" />
     <ClInclude Include="RapooHid.h" />
@@ -120,6 +121,7 @@
     <ClCompile Include="Diag.cpp" />
     <ClCompile Include="MouseMonitor.cpp" />
     <ClCompile Include="MouseStatus.cpp" />
+    <ClCompile Include="OptionsDlg.cpp" />
     <ClCompile Include="MouseStatusItem.cpp" />
     <ClCompile Include="RapooHid.cpp" />
   </ItemGroup>

@@ -6,6 +6,7 @@
 
 #include "MouseMonitor.h"
 #include "Diag.h"
+#include "OptionsDlg.h"
 #include "resource.h"
 
 namespace {
@@ -175,9 +176,9 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
 
     if (state.battery < 0)
     {
-        text += L"\n提示：该设备的电量没有通过标准 HID 电池用途"
-                L"（Usage Page 0x06 / Usage 0x20）或蓝牙设备属性暴露给系统，"
-                L"插件拿不到数字。日志里有完整的枚举结果：\n";
+        text += L"\n提示：没有任何数据来源能给出电量。"
+                L"右键本项 →「插件设置」或右键菜单里的「启用诊断日志 / 清空诊断日志」"
+                L"可管理诊断日志，日志里记录了完整的枚举结果：\n";
         text += diag::LogFilePath();
     }
 
@@ -197,7 +198,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.2";
+        return L"1.0.3";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:
@@ -228,6 +229,85 @@ void* CMouseStatus::GetPluginIcon()
         }
     }
     return m_icon;
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////
+// 设置：右键菜单命令 + 选项对话框
+
+namespace {
+
+constexpr int kCmdToggleLog = 0;
+constexpr int kCmdClearLog = 1;
+constexpr int kCmdOpenFolder = 2;
+constexpr int kCmdDumpNow = 3;
+
+// TrafficMonitor 的插件命令 ID 段（主程序 resource.h 里的
+// ID_PLUGIN_COMMAND_START / ID_PLUGIN_COMMAND_MAX）。主窗口菜单在查勾选状态时
+// 传的是命令 ID 本身，任务栏菜单传的是序号，这里把两种都认下来。
+constexpr int kCommandIdStart = 33408;
+constexpr int kCommandIdMax = 33664;
+
+} // namespace
+
+int CMouseStatus::GetCommandCount()
+{
+    return 4;
+}
+
+const wchar_t* CMouseStatus::GetCommandName(int command_index)
+{
+    switch (command_index)
+    {
+    case kCmdToggleLog: return L"启用诊断日志";
+    case kCmdClearLog: return L"清空诊断日志";
+    case kCmdOpenFolder: return L"打开日志文件夹";
+    case kCmdDumpNow: return L"立即写入诊断信息";
+    default: break;
+    }
+    return nullptr;
+}
+
+int CMouseStatus::IsCommandChecked(int command_index)
+{
+    if (command_index >= kCommandIdStart && command_index <= kCommandIdMax)
+        command_index -= kCommandIdStart;
+
+    if (command_index == kCmdToggleLog)
+        return diag::Enabled() ? 1 : 0;
+    return 0;
+}
+
+void CMouseStatus::OnPluginCommand(int command_index, void* hWnd, void* para)
+{
+    (void)hWnd;
+    (void)para;
+
+    switch (command_index)
+    {
+    case kCmdToggleLog:
+        diag::SetEnabled(!diag::Enabled());
+        break;
+    case kCmdClearLog:
+        diag::DeleteLogFiles();
+        break;
+    case kCmdOpenFolder:
+        diag::OpenLogFolder();
+        break;
+    case kCmdDumpNow:
+        // 日志关着的话先打开，否则写出去什么也看不到
+        if (!diag::Enabled())
+            diag::SetEnabled(true);
+        CMouseMonitor::Instance().DumpDiagnosticsOnce();
+        diag::OpenLogFolder();
+        break;
+    default:
+        break;
+    }
+}
+
+ITMPlugin::OptionReturn CMouseStatus::ShowOptionsDialog(void* hParent)
+{
+    return ShowMouseStatusOptions(hParent) ? OR_OPTION_CHANGED : OR_OPTION_UNCHANGED;
 }
 
 extern "C" __declspec(dllexport) ITMPlugin* TMPluginGetInstance()

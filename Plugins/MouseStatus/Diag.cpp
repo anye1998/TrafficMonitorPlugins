@@ -2,14 +2,21 @@
 #include "Diag.h"
 
 #include <windows.h>
+#include <shellapi.h>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
 
+#pragma comment(lib, "advapi32.lib")
+#pragma comment(lib, "shell32.lib")
+
 namespace {
 
 constexpr ULONGLONG kMaxLogBytes = 1024 * 1024;   // 超过 1 MB 时滚转为 .old
+
+const wchar_t* const kRegKey = L"Software\\MouseStatus";
+const wchar_t* const kRegValueEnableLog = L"EnableLog";
 
 struct DiagState
 {
@@ -18,6 +25,8 @@ struct DiagState
     std::wstring dir;
     bool path_ready = false;
     bool enabled = true;
+    bool hard_disabled = false;    // 环境变量强制关闭
+    bool settings_loaded = false;
     ULONGLONG bytes_written = 0;
 
     DiagState()
@@ -26,7 +35,10 @@ struct DiagState
 
         wchar_t buf[8] = { 0 };
         if (::GetEnvironmentVariableW(L"MOUSESTATUS_NOLOG", buf, 8) > 0 && buf[0] == L'1')
+        {
+            hard_disabled = true;
             enabled = false;
+        }
     }
 
     ~DiagState()
@@ -41,6 +53,41 @@ DiagState& State()
     // 几行日志落在析构之后就会踩已释放的 CRITICAL_SECTION。这里不回收，代价只有几十字节。
     static DiagState* s = new DiagState();
     return *s;
+}
+
+bool ReadRegEnabled(bool& value)
+{
+    HKEY key = nullptr;
+    if (::RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+        return false;
+
+    DWORD data = 0;
+    DWORD size = sizeof(data);
+    DWORD type = 0;
+    const bool ok = (::RegQueryValueExW(key, kRegValueEnableLog, nullptr, &type,
+                         (LPBYTE)&data, &size)
+                        == ERROR_SUCCESS)
+        && type == REG_DWORD;
+    ::RegCloseKey(key);
+    if (!ok)
+        return false;
+
+    value = (data != 0);
+    return true;
+}
+
+void WriteRegEnabled(bool value)
+{
+    HKEY key = nullptr;
+    if (::RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key,
+            nullptr)
+        != ERROR_SUCCESS)
+    {
+        return;
+    }
+    const DWORD data = value ? 1u : 0u;
+    ::RegSetValueExW(key, kRegValueEnableLog, 0, REG_DWORD, (const BYTE*)&data, sizeof(data));
+    ::RegCloseKey(key);
 }
 
 // 取 %LOCALAPPDATA%\MouseStatus，失败则退到 %TEMP%
@@ -134,7 +181,32 @@ namespace diag {
 
 bool Enabled()
 {
-    return State().enabled;
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    if (!st.settings_loaded)
+    {
+        st.settings_loaded = true;
+        bool reg_value = true;
+        if (!st.hard_disabled && ReadRegEnabled(reg_value))
+            st.enabled = reg_value;
+        if (st.hard_disabled)
+            st.enabled = false;
+    }
+    const bool value = st.enabled;
+    ::LeaveCriticalSection(&st.cs);
+    return value;
+}
+
+void SetEnabled(bool enabled)
+{
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    st.settings_loaded = true;
+    st.enabled = st.hard_disabled ? false : enabled;
+    const bool write_value = st.enabled;
+    ::LeaveCriticalSection(&st.cs);
+
+    WriteRegEnabled(write_value);
 }
 
 std::wstring LogFilePath()
@@ -147,10 +219,71 @@ std::wstring LogFilePath()
     return p;
 }
 
+std::wstring LogDirectory()
+{
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    ResolvePath(st);
+    std::wstring d = st.dir;
+    ::LeaveCriticalSection(&st.cs);
+    return d;
+}
+
+bool DeleteLogFiles()
+{
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    ResolvePath(st);
+    const std::wstring log_path = st.path;
+    const std::wstring old_path = st.path + L".old";
+    st.bytes_written = 0;
+    ::LeaveCriticalSection(&st.cs);
+
+    // 日志文件每次写都是「打开-追加-关闭」，不会长期占用句柄，直接删即可
+    const bool ok_log = (::DeleteFileW(log_path.c_str()) != FALSE)
+        || (::GetLastError() == ERROR_FILE_NOT_FOUND);
+    ::DeleteFileW(old_path.c_str());
+
+    if (ok_log)
+    {
+        // 删完立刻写一条，确认日志通道仍然正常（如果日志是关的就不会写）
+        Log(L"=== 日志已被手动清空 ===");
+    }
+    return ok_log;
+}
+
+unsigned long long LogFileSize()
+{
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    ResolvePath(st);
+    std::wstring p = st.path;
+    ::LeaveCriticalSection(&st.cs);
+
+    HANDLE h = ::CreateFileW(p.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+
+    LARGE_INTEGER size;
+    size.QuadPart = 0;
+    ::GetFileSizeEx(h, &size);
+    ::CloseHandle(h);
+    return (unsigned long long)size.QuadPart;
+}
+
+bool OpenLogFolder()
+{
+    const std::wstring dir = LogDirectory();
+    const HINSTANCE inst = ::ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr,
+        SW_SHOWNORMAL);
+    return (INT_PTR)inst > 32;
+}
+
 void Log(const wchar_t* fmt, ...)
 {
     DiagState& st = State();
-    if (!st.enabled || fmt == nullptr)
+    if (fmt == nullptr || !Enabled())
         return;
 
     wchar_t body[2048] = { 0 };
@@ -163,8 +296,8 @@ void Log(const wchar_t* fmt, ...)
     ::GetLocalTime(&now);
 
     wchar_t line[2200] = { 0 };
-    ::_snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02u:%02u:%02u.%03u] %s\r\n", now.wHour, now.wMinute,
-        now.wSecond, now.wMilliseconds, body);
+    ::_snwprintf_s(line, _countof(line), _TRUNCATE, L"[%02u:%02u:%02u.%03u] %s\r\n", now.wHour,
+        now.wMinute, now.wSecond, now.wMilliseconds, body);
 
     const std::string utf8 = ToUtf8(line, (int)wcslen(line));
 
@@ -177,7 +310,7 @@ void Log(const wchar_t* fmt, ...)
 
 void LogHex(const wchar_t* label, const unsigned char* data, unsigned int len)
 {
-    if (!State().enabled || data == nullptr || len == 0)
+    if (data == nullptr || len == 0 || !Enabled())
         return;
 
     if (len > 64)

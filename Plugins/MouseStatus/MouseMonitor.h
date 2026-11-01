@@ -102,7 +102,6 @@ private:
     BYTE m_read_buf[128]{};
     bool m_status_read_pending{ false };  // status 端点上有一帧读请求正挂起
     int m_rapoo_battery{ -1 };
-    bool m_rapoo_wired{ false };
     bool m_rapoo_alive{ false };
     ULONGLONG m_rapoo_report_tick{ 0 };
     ULONGLONG m_rapoo_probe_tick{ 0 };
@@ -111,10 +110,12 @@ private:
     // 通用 HID
     std::vector<HidCandidate> m_candidates;
     ULONGLONG m_hid_scan_tick{ 0 };
+    std::wstring m_hid_scan_sig;   // 上次候选清单的指纹，仅变化时写日志
 
     // 蓝牙
     std::vector<BtBatteryEntry> m_bt_entries;
     ULONGLONG m_bt_scan_tick{ 0 };
+    std::wstring m_bt_scan_sig;
 
     // 日志节流：只在状态变化时写快照
     std::wstring m_last_published;

@@ -213,11 +213,13 @@ bool ParseStatus(const BYTE* buf, DWORD len, Status& out)
         return false;
     if (buf[0] != ID_STATUS)
         return false;
-    const BYTE marker = (BYTE)(buf[1] & 0xF0);
-    if (marker != MARKER_DONGLE && marker != MARKER_WIRED)
-        return false;
 
-    out.wired = (marker == MARKER_WIRED);
+    // 注意：这里刻意不再用 buf[1] 的高 4 位去判定「有线 / 无线」。
+    // 参考项目把 0x10 当作「USB 有线」，但雷柏 VT3（PID 0x1412，2.4G 接收器）实测
+    // buf[1] 恒为 0x10，于是被误判成有线、进而被推导成「充电中」。
+    // 连接方式改由「设备节点的 PID 前缀」判定（0x46xx = 插线直连，0x14xx = 2.4G 接收器），
+    // 这是系统枚举层面的事实，不依赖厂商字节语义。这里只把原始值留给日志。
+    out.mode_nibble = (BYTE)(buf[1] & 0xF0);
     out.dpi = (int)buf[3] | ((int)buf[4] << 8);
 
     const BYTE raw = buf[8];
