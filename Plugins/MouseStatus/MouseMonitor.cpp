@@ -19,11 +19,25 @@ extern "C"
 namespace {
 
 constexpr DWORD kReportBudgetMs = 600;           // 每轮最多等待被动上报的时长
-constexpr ULONGLONG kProbeIntervalMs = 3000;     // 无上报时活性探测的间隔
-constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔
+constexpr ULONGLONG kProbeIntervalMs = 3000;     // 无上报时活性探测的间隔（别太密，命令会吵醒鼠标）
+constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔（仅在句柄确实失效后）
 constexpr ULONGLONG kHidRescanMs = 8000;         // 通用 HID 候选重新枚举的间隔
 constexpr ULONGLONG kBluetoothRescanMs = 6000;   // 蓝牙电量属性重新查询的间隔
-constexpr ULONGLONG kStaleThresholdMs = 8000;    // 无主动探测能力时的「过期」阈值
+
+// 雷柏鼠标「沉默多久算断开」
+//
+// 鼠标静置时并不是每秒都发状态报文（实测 VT3 在 2.4G 下静置可以连着 15 秒一帧不发），
+// 所以「本轮没报文」绝不能直接判成断开。这里改成：只要还有「有应答」的记录就继续算在线，
+// 超过宽限期才判离线。
+//
+// 宽限期分两档：
+//   - 活性探测可用（本次绑定期间探测成功过，见 ProbeTrusted）→ 8 秒。
+//     探测每轮都会跑，8 秒没应答基本就是关机或离开范围了，响应足够快。
+//   - 探测不可用（机型/驱动不支持特性通道）→ 30 秒。这时只能靠被动上报判断，
+//     宁可慢也不要把「静置」误报成「断开」。
+constexpr ULONGLONG kRapooGraceWithProbeMs = 8000;
+constexpr ULONGLONG kRapooGraceNoProbeMs = 30000;
+constexpr int kProbeFailStreakLimit = 3;         // 连续失败这么多次就写一条日志说明
 
 // 主循环周期。默认与 TrafficMonitor 的采集间隔（general.monitor_time_span，默认 1000）对齐：
 // 主程序要等 DataRequired 被调用才会来取一次数据、状态栏窗口也是 1000ms 重绘一次，
@@ -560,6 +574,12 @@ void CMouseMonitor::CloseRapooHandles()
     // 充电位代表「此刻正在充电」，断连后不能沿用上一次的值，
     // 否则鼠标收进抽屉里还一直显示「充电中」。
     m_rapoo_charging = false;
+    // 句柄没了就不再「负责」这台设备：通用 HID 链路可以重新作为判据
+    m_rapoo_authoritative = false;
+    // 重新绑定后要重新验证探测通道是否可用，别把上一次的结论带过来
+    m_probe_ok_tick = 0;
+    m_probe_fail_streak = 0;
+    m_probe_tick = 0;
     if (m_h_status != INVALID_HANDLE_VALUE)
     {
         ::CloseHandle(m_h_status);
@@ -621,7 +641,6 @@ bool CMouseMonitor::ApplyRapooReport(DWORD bytes)
         return false;
     }
 
-    m_rapoo_report_tick = ::GetTickCount64();
     // 连接方式保持由 PID 前缀决定（EnsureRapoo 里设置），不采纳报文里的模式位：
     // VT3 在 2.4G 下 buf[1] 高 4 位仍是 0x10，照搬会把无线误判成有线。
     if (status.battery >= 0)
@@ -713,8 +732,13 @@ bool CMouseMonitor::ReadRapooReports(int budget_ms)
             const DWORD err = ::GetLastError();
             if (err != ERROR_IO_PENDING)
             {
+                // 句柄真的坏了（接收器被拔掉、设备节点重建）：这里必须重新枚举，
+                // 否则会一直拿着一个死句柄打转。
                 diag::Log(L"雷柏 ReadFile 失败，GetLastError=%lu，将重新打开端点", err);
-                return false;   // 句柄失效，交给上层重新打开
+                CloseRapooHandles();
+                m_ep_valid = false;
+                m_rapoo_alive = false;
+                return false;
             }
             m_status_read_pending = true;
         }
@@ -730,7 +754,15 @@ bool CMouseMonitor::ReadRapooReports(int budget_ms)
             if (!::GetOverlappedResult(m_h_status, &m_ov, &bytes, FALSE))
             {
                 m_status_read_pending = false;
-                diag::Log(L"雷柏 GetOverlappedResult 失败，GetLastError=%lu", ::GetLastError());
+                const DWORD err = ::GetLastError();
+                diag::Log(L"雷柏 GetOverlappedResult 失败，GetLastError=%lu，将重新打开端点", err);
+                if (err == ERROR_DEVICE_NOT_CONNECTED || err == ERROR_INVALID_HANDLE
+                    || err == ERROR_OPERATION_ABORTED)
+                {
+                    CloseRapooHandles();
+                    m_ep_valid = false;
+                    m_rapoo_alive = false;
+                }
                 return false;
             }
             m_status_read_pending = false;
@@ -764,41 +796,89 @@ void CMouseMonitor::CancelPendingStatusRead()
     m_status_read_pending = false;
 }
 
+// 雷柏「活性探测」：往命令通道下发一次「读寄存器」，再从特性通道取应答。
+// 拿得到应答 = 鼠标此刻还在（接收器本身是常驻设备，靠它判断不了鼠标开没开）。
+//
+// 注意三个坑，都是踩过之后加上的：
+//   1) 调用前必须先 CancelPendingStatusRead()。status 端点上挂着未完成的读请求时，
+//      同一台设备上特性通道的应答取不回来，探测 100% 失败。
+//   2) 睡眠 20ms 后立刻读太急，设备刚从省电状态醒来时会返回全零；这里改成
+//      第一次等 30ms、第二次等 60ms，并且补发一次解锁握手。
+//   3) 失败时要把「哪一步失败」写进日志。旧版探测静默失败，只能看到句柄被反复关掉，
+//      根本没法定位。
 bool CMouseMonitor::ProbeRapooAlive()
 {
     if (m_h_control == INVALID_HANDLE_VALUE || m_h_feature == INVALID_HANDLE_VALUE)
         return false;
 
-    BYTE cmd[33] = { 0 };
-    const DWORD len = rapoo::BuildReadCommand(rapoo::BANK_SYSTEM, rapoo::ADDR_POLLING_HZ, 1,
-        cmd, sizeof(cmd));
-    if (len == 0 || !WriteOverlapped(m_h_control, cmd, len, 300))
-        return false;
-
-    ::Sleep(20);
-
     int report_len = m_ep.feature_report_len;
     if (report_len < 9 || report_len > (int)sizeof(m_read_buf))
         report_len = 33;
 
-    // 特性报文能读回来就说明设备在应答；读不到即判为休眠/关机
-    static BYTE feature_buf[128];
-    ::ZeroMemory(feature_buf, sizeof(feature_buf));
-    feature_buf[0] = rapoo::ID_FEATURE;
-    if (!::HidD_GetFeature(m_h_feature, feature_buf, (ULONG)report_len))
-        return false;
-
-    // 全零应答等同于没有应答：部分驱动在设备休眠时仍会「成功」返回一块空缓冲区
-    bool all_zero = true;
-    for (int i = 1; i < report_len; ++i)
+    for (int attempt = 0; attempt < 2; ++attempt)
     {
-        if (feature_buf[i] != 0)
+        if (::WaitForSingleObject(m_stop, 0) == WAIT_OBJECT_0)
+            return false;
+
+        // 补一次 A5 A3 解锁：设备睡着时会把上一条命令丢掉，握手能把它叫醒
+        BYTE unlock[33] = { 0 };
+        const DWORD unlock_len = rapoo::BuildUnlockPacket(unlock, sizeof(unlock));
+        if (unlock_len > 0)
+            WriteOverlapped(m_h_control, unlock, unlock_len, 200);
+
+        BYTE cmd[33] = { 0 };
+        const DWORD len = rapoo::BuildReadCommand(rapoo::BANK_SYSTEM, rapoo::ADDR_POLLING_HZ, 1,
+            cmd, sizeof(cmd));
+        if (len == 0)
+            return false;
+
+        if (!WriteOverlapped(m_h_control, cmd, len, 300))
         {
-            all_zero = false;
-            break;
+            LogProbeFailure(attempt, L"命令下发失败");
+            ::Sleep(40);
+            continue;
         }
+
+        ::Sleep(attempt == 0 ? 30 : 60);
+
+        // 特性报文能读回来、且不是一块全零缓冲区，才算设备在应答。
+        // 全零等同于没有应答：驱动在设备休眠时仍会「成功」返回一块空缓冲区。
+        BYTE reply[128] = { 0 };
+        reply[0] = rapoo::ID_FEATURE;
+        if (!::HidD_GetFeature(m_h_feature, reply, (ULONG)report_len))
+        {
+            LogProbeFailure(attempt, L"HidD_GetFeature 失败");
+            ::Sleep(40);
+            continue;
+        }
+
+        bool any_nonzero = false;
+        for (int i = 1; i < report_len; ++i)
+        {
+            if (reply[i] != 0)
+            {
+                any_nonzero = true;
+                break;
+            }
+        }
+        if (!any_nonzero)
+        {
+            LogProbeFailure(attempt, L"特性应答全零");
+            ::Sleep(40);
+            continue;
+        }
+        return true;
     }
-    return !all_zero;
+    return false;
+}
+
+void CMouseMonitor::LogProbeFailure(int attempt, const wchar_t* why)
+{
+    if (m_probe_fail_logged >= 6)
+        return;
+    ++m_probe_fail_logged;
+    diag::Log(L"雷柏活性探测失败（第 %d 次尝试）：%s，GetLastError=%lu", attempt + 1, why,
+        ::GetLastError());
 }
 
 SourceResult CMouseMonitor::PollRapoo()
@@ -809,6 +889,7 @@ SourceResult CMouseMonitor::PollRapoo()
     if (!EnsureRapoo())
         return result;
 
+    bool just_opened = false;
     if (m_h_status == INVALID_HANDLE_VALUE)
     {
         if (!OpenRapooHandles())
@@ -816,35 +897,87 @@ SourceResult CMouseMonitor::PollRapoo()
             m_ep_valid = false;
             return result;
         }
-        m_rapoo_report_tick = 0;
+        m_rapoo_authoritative = true;
+        m_rapoo_last_evidence = ::GetTickCount64();   // 宽限期从刚接上算起
+        // 刚枚举到接收器就先当作在线：真要是鼠标没开，宽限期一到自然会翻成离线。
+        // 反过来（一上来就报离线）会让状态栏闪一下「--」。
+        m_rapoo_alive = true;
+        just_opened = true;
+
+        // 刚打开句柄、status 端点上还没有挂起的读请求，此时探一次活最干净：
+        // 结果直接说明「这台机器的特性通道能不能当活性判据用」。
+        const bool baseline = ProbeRapooAlive();
+        diag::Log(L"雷柏端点首次探测：%s", baseline ? L"有应答" : L"无应答");
+        if (baseline)
+        {
+            m_probe_ok_tick = m_rapoo_last_evidence;
+            m_probe_fail_streak = 0;
+        }
     }
 
     const bool got_report = ReadRapooReports(kReportBudgetMs);
-    const ULONGLONG now = ::GetTickCount64();
 
-    if (got_report)
+    // 没有被动上报时再主动探一次活。
+    // 关键：探测前必须先把挂起的读请求撤掉 —— 同一台设备上留着未完成的读请求时，
+    // 特性通道拿不到应答（旧版就是带着挂起读去 ping，每次必失败，
+    // 于是每隔 2~3 秒把句柄全关掉重来，电量在 66% 与未知之间来回跳）。
+    // 参考实现也是在 CancelIo 之后才 ping 的。
+    bool probe_ok = false;
+    bool probed = false;
+    const ULONGLONG probe_now = ::GetTickCount64();
+    const bool probe_due = (m_probe_tick == 0) || (probe_now - m_probe_tick >= kProbeIntervalMs);
+    if (!got_report && !just_opened && probe_due && m_h_control != INVALID_HANDLE_VALUE
+        && m_h_feature != INVALID_HANDLE_VALUE)
     {
-        m_rapoo_alive = true;
+        // 探测本身会把鼠标从省电状态叫醒，所以不能每轮都做，3 秒一次足够
+        m_probe_tick = probe_now;
+        CancelPendingStatusRead();
+        probed = true;
+        probe_ok = ProbeRapooAlive();
     }
-    else if (m_h_control != INVALID_HANDLE_VALUE && m_h_feature != INVALID_HANDLE_VALUE)
+
+    const ULONGLONG now = ::GetTickCount64();
+    if (got_report || probe_ok)
     {
-        if (m_rapoo_probe_tick == 0 || now - m_rapoo_probe_tick >= kProbeIntervalMs)
+        m_rapoo_last_evidence = now;
+        if (probe_ok)
         {
-            m_rapoo_probe_tick = now;
-            m_rapoo_alive = ProbeRapooAlive();
+            m_probe_fail_streak = 0;
+            m_probe_fail_logged = 0;
+            if (m_probe_ok_tick == 0)
+                diag::Log(L"雷柏活性探测可用：静置无上报时也能确认鼠标还在");
+            m_probe_ok_tick = now;
+        }
+        if (!m_rapoo_alive)
+        {
+            diag::Log(L"雷柏鼠标有应答，标记为已连接（来源：%s）",
+                got_report ? L"状态上报" : L"活性探测");
+            m_rapoo_alive = true;
         }
     }
     else
     {
-        // 无法主动探测时退化为「最近是否收到过上报」
-        m_rapoo_alive = (m_rapoo_report_tick != 0)
-            && (now - m_rapoo_report_tick < kStaleThresholdMs);
+        if (probed && ++m_probe_fail_streak == kProbeFailStreakLimit)
+            diag::Log(L"雷柏活性探测连续失败 %d 次，改用「长时间无上报」判断连接", m_probe_fail_streak);
+
+        const ULONGLONG grace = ProbeTrusted() ? kRapooGraceWithProbeMs : kRapooGraceNoProbeMs;
+        if (now >= m_rapoo_last_evidence && now - m_rapoo_last_evidence >= grace)
+        {
+            if (m_rapoo_alive)
+            {
+                diag::Log(L"雷柏鼠标 %.0f 秒无应答（宽限 %.0f 秒），标记为未连接",
+                    (double)(now - m_rapoo_last_evidence) / 1000.0, (double)grace / 1000.0);
+                m_rapoo_alive = false;
+            }
+        }
+        // 否则保持上一次的结论：沉默只是静置，不是断开
     }
 
     if (!m_rapoo_alive)
     {
-        CloseRapooHandles();
-        m_ep_valid = false;
+        // 端点与句柄都留着：设备一有应答立刻恢复，不必再走「3 秒后重新枚举」那条路
+        // （那条路正是旧版界面来回跳的根源）。只把对外报的状态置为离线。
+        m_rapoo_charging = false;
         return result;
     }
 
@@ -863,6 +996,20 @@ SourceResult CMouseMonitor::PollRapoo()
     // 「2.4G 连接 + 插着充电线」也能被正确识别，靠的就是设备自报的充电位
     result.charging = m_rapoo_charging;
     return result;
+}
+
+bool CMouseMonitor::ProbeTrusted() const
+{
+    // 只在「这次绑定期间成功过」时相信探测的负面结论。
+    // 一旦相信，就不再因为后来的连续失败而反悔：否则鼠标关机时探测必然失败，
+    // 反悔会让宽限期从 8 秒退回 30 秒，反而更晚才能显示「未连接」。
+    return m_probe_ok_tick != 0;
+}
+
+bool CMouseMonitor::IsRapooMouseIface(const MouseIface& m) const
+{
+    return m.vid == rapoo::VENDOR_ID
+        && (((m.pid & 0xFF00) == 0x1400) || ((m.pid & 0xFF00) == 0x4600));
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -1040,12 +1187,31 @@ SourceResult CMouseMonitor::PollHidBattery()
     // 这时必须报「在线 + 电量未知」，而不是让显示层回落到「未检测到鼠标」。
     if (!m_mouse_ifaces.empty())
     {
-        const MouseIface& first = m_mouse_ifaces.front();
+        // 雷柏接收器是常驻设备：鼠标关机后接收器（连同它的 HID 接口）不会从系统里消失，
+        // 所以「接口还在」并不能推出「鼠标还连着」。这台设备的连接状态已经由雷柏私有
+        // 协议负责（而且它的活性探测确实可用）时，就不许通用 HID 再顶上来报「已连接」。
+        const bool rapoo_says_offline = m_rapoo_authoritative && ProbeTrusted() && !m_rapoo_alive;
+
+        const MouseIface* first = nullptr;
+        for (const auto& iface : m_mouse_ifaces)
+        {
+            if (rapoo_says_offline && IsRapooMouseIface(iface))
+                continue;
+            first = &iface;
+            break;
+        }
+
+        if (first == nullptr)
+        {
+            diag::LogThrottled(L"hid_rapoo_offline",
+                L"雷柏接收器接口仍在，但鼠标没有任何应答，按离线处理");
+            return result;   // valid 保持 false
+        }
 
         // 蓝牙鼠标关机后，系统里的 HID 接口可能还残留一两轮（能打开、能取 caps），
         // 这时单看接口会把它当成「已连接」。蓝牙栈已经明确说未连接的话，以它为准。
-        const bool is_bt = (first.transport == HidTransport::BtClassic
-            || first.transport == HidTransport::BtLe);
+        const bool is_bt = (first->transport == HidTransport::BtClassic
+            || first->transport == HidTransport::BtLe);
         if (is_bt && m_bt_conn_state == 0)
         {
             diag::LogThrottled(L"hid_bt_offline",
@@ -1054,9 +1220,10 @@ SourceResult CMouseMonitor::PollHidBattery()
         }
 
         result.valid = true;
-        result.battery = first.battery_percent;   // 扫描时读到过就用，读不到是 -1
-        result.link = LinkFromTransport(first.transport, first.vid, first.pid, first.product);
-        result.name = first.product;
+        result.battery = first->battery_percent;   // 扫描时读到过就用，读不到是 -1
+        result.link = LinkFromTransport(first->transport, first->vid, first->pid,
+            first->product);
+        result.name = first->product;
         if (result.name.empty())
         {
             result.name = (result.link == LinkKind::Bluetooth

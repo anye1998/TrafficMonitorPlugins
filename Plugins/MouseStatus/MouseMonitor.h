@@ -4,9 +4,14 @@
 //
 // 1) 连接状态不再等同于「设备节点存在」
 //    参考实现只要接收器枚举成功就把状态置为「已连接」，鼠标关机或进入休眠后仍显示连接。
-//    这里改为「活性探测」：雷柏设备在长时间没有主动上报时会主动读取一次寄存器，
-//    读得到才算在线；通用 HID 设备以「本次电量读取是否成功」为活性依据；
-//    蓝牙设备以「设备节点当前是否在线（DIGCF_PRESENT）」为依据。
+//    两条链路各有各的判据：
+//      · 2.4G 接收器：接收器是常驻设备，鼠标关机后它的 HID 接口依然在，所以不能拿
+//        「接口还在」当在线。改为对鼠标做「活性探测」（下发读寄存器命令、取特性应答），
+//        并且只有**真的探测通过**才允许用它推翻「在线」结论；验证不了就老实按在线处理，
+//        宁可漏报也不要误报。
+//      · 蓝牙：节点在设备关机后也不消失，改查 BLUETOOTH_DEVICE_INFO::fConnected。
+//    另外，「本轮没收到报文」绝不等于断开：雷柏鼠标静置时十几秒一帧不发，
+//    离线判定必须基于「沉默时长」而不是「本轮无数据」，否则界面会在有读数与未知之间跳。
 //
 // 2) 充电状态不再由「有线」或含义不明的报文位推断
 //    参考实现用 (statusByte & 0x02) 与 buf[9] == 1/2 判定充电，一旦这些位被置起，
@@ -95,7 +100,14 @@ private:
     void CancelPendingStatusRead();
     bool ApplyRapooReport(DWORD bytes);
     bool ProbeRapooAlive();
+    void LogProbeFailure(int attempt, const wchar_t* why);
     bool WriteOverlapped(HANDLE h, const BYTE* data, DWORD len, DWORD timeout_ms);
+
+    // 活性探测是否可信：成功过、且最近没有连续失败。
+    // 只用来决定「沉默多久算断开」，以及要不要相信它给出的离线结论。
+    bool ProbeTrusted() const;
+    // 是否是我们通过雷柏私有协议在盯的那台雷柏鼠标（接收器）
+    bool IsRapooMouseIface(const MouseIface& m) const;
 
     void ScanHidCandidates();
 
@@ -126,8 +138,21 @@ private:
     int m_rapoo_battery{ -1 };
     bool m_rapoo_charging{ false };
     bool m_rapoo_alive{ false };
-    ULONGLONG m_rapoo_report_tick{ 0 };
-    ULONGLONG m_rapoo_probe_tick{ 0 };
+    // 「设备有应答」的最近时刻：被动上报与活性探测都算。
+    // 沉默不等于断开——雷柏鼠标静置时十几秒不发一帧，所以离线判定必须基于这段时间差，
+    // 而不是「本轮没收到报文就立刻判死」（旧版正是如此，界面每隔两三秒就在
+    // 「66%」和「未知」之间来回跳）。
+    ULONGLONG m_rapoo_last_evidence{ 0 };
+    // 上一轮活性探测的时刻（探测会吵醒鼠标，按 kProbeIntervalMs 控制频率）
+    ULONGLONG m_probe_tick{ 0 };
+    // 雷柏私有协议是否正在负责这台接收器（句柄打开成功即算）。
+    // 用来阻止通用 HID 链路在鼠标关机后顶上来报「已连接」：接收器是常驻设备，
+    // 它的 HID 接口永远不会因为鼠标关机而消失。
+    bool m_rapoo_authoritative{ false };
+    // 活性探测的统计：最近一次成功的时刻（0 = 从未成功）与连续失败次数
+    ULONGLONG m_probe_ok_tick{ 0 };
+    int m_probe_fail_streak{ 0 };
+    int m_probe_fail_logged{ 0 };   // 失败明细只记前几次，避免刷爆日志
     // 原始报文记录策略：进程启动后先记若干帧；之后只要报文内容变了就记一帧。
     // 不能只按「前 N 帧」截断——排查插拔充电这种事件时，等用户操作完，
     // 前 N 帧早用完了，正好错过关键的那几帧。
