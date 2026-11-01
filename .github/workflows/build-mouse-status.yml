@@ -103,13 +103,53 @@ jobs:
       - name: List assets
         run: ls -l artifacts
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            artifacts/MouseStatus_x64.zip \
-            artifacts/MouseStatus_x86.zip \
-            --repo "${GITHUB_REPOSITORY}" \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+          # 标题用「MouseStatus V1.0.12」这种可读形式，而不是原始 tag 名
+          title="${GITHUB_REF_NAME/MouseStatus_/MouseStatus }"
+
+          # 正文优先用仓库里随版本提交的说明文件：.github/release-notes/<tag>.md
+          # 没有该文件时退回自动生成的 changelog。
+          # 这样发布说明跟着代码一起 review，不必事后手工改 Release。
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+
+          # 幂等：Release 已存在时改为更新标题/正文并覆盖资产。
+          # 好处是重推同一个 tag 就能刷新发布页（例如补发说明、重编 DLL）。
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release exists, updating"
+            if [ -f "$notes" ]; then
+              echo "using notes file: $notes"
+              # gh release edit 没有 --generate-notes，所以只有拿到文件时才动正文
+              gh release edit "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "$title" \
+                --notes-file "$notes"
+            else
+              gh release edit "${GITHUB_REF_NAME}" \
+                --repo "${GITHUB_REPOSITORY}" \
+                --title "$title"
+            fi
+            gh release upload "${GITHUB_REF_NAME}" \
+              artifacts/MouseStatus_x64.zip \
+              artifacts/MouseStatus_x86.zip \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          elif [ -f "$notes" ]; then
+            echo "creating release with notes file: $notes"
+            gh release create "${GITHUB_REF_NAME}" \
+              artifacts/MouseStatus_x64.zip \
+              artifacts/MouseStatus_x86.zip \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$title" \
+              --notes-file "$notes"
+          else
+            echo "creating release with generated notes"
+            gh release create "${GITHUB_REF_NAME}" \
+              artifacts/MouseStatus_x64.zip \
+              artifacts/MouseStatus_x86.zip \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "$title" \
+              --generate-notes
+          fi
