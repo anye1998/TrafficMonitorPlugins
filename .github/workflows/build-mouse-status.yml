@@ -1,0 +1,111 @@
+name: Build MouseStatus plugin (x64 + x86)
+
+# 只编 MouseStatus 插件（纯 Win32，不依赖 MFC，因此不需要额外安装 VS 组件）。
+# 触发方式：
+#   - workflow_dispatch：手动构建，仅产出 artifact
+#   - push tag MouseStatus_V*：构建并自动创建 Release，附上 x64/x86 两个 zip
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'MouseStatus_V*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    name: MouseStatus.dll (Release ${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            arch_name: x64
+          - platform: Win32
+            arch_name: x86
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build plugin
+        shell: pwsh
+        run: |
+          msbuild Plugins\MouseStatus\MouseStatus.vcxproj `
+            /m `
+            /p:Configuration=Release `
+            /p:Platform=${{ matrix.platform }} `
+            /p:PlatformToolset=v143 `
+            /verbosity:minimal
+          if ($LASTEXITCODE -ne 0) { throw "msbuild failed with exit code $LASTEXITCODE" }
+
+      - name: Sanity checks
+        shell: pwsh
+        run: |
+          $dll = "bin/${{ matrix.platform }}/Release/MouseStatus.dll"
+          if (-not (Test-Path $dll)) { throw "MouseStatus.dll not produced at $dll" }
+          $item = Get-Item $dll
+          Write-Host "DLL: $($item.FullName)  $($item.Length) bytes"
+          if ($item.Length -lt 20KB) { throw "dll looks too small ($($item.Length) bytes)" }
+
+          # 1) 必须导出 TMPluginGetInstance
+          $exports = & dumpbin /exports $dll | Out-String
+          if ($exports -notmatch 'TMPluginGetInstance') { throw "TMPluginGetInstance is not exported" }
+          Write-Host "OK: TMPluginGetInstance exported"
+
+          # 2) 文件版本必须与 GetInfo(TMI_VERSION) 一致
+          $fv = $item.VersionInfo.FileVersion
+          if ($fv -notlike '1.0.0*') { throw "unexpected file version: $fv" }
+          Write-Host "OK: file version $fv"
+
+          # 3) 中文界面文本必须按 UTF-16 正确落地（验证 /utf-8 生效）
+          $uni = [System.Text.Encoding]::Unicode.GetString([System.IO.File]::ReadAllBytes($dll))
+          foreach ($word in @('鼠标电量', '鼠标连接方式', '充电中', '蓝牙')) {
+            if (-not $uni.Contains($word)) { throw "missing UTF-16 string: $word" }
+          }
+          Write-Host "OK: Chinese strings are UTF-16 encoded correctly"
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist/${{ matrix.arch_name }}" | Out-Null
+          Copy-Item "bin/${{ matrix.platform }}/Release/MouseStatus.dll" "dist/${{ matrix.arch_name }}/"
+          Compress-Archive -Path "dist/${{ matrix.arch_name }}/*" `
+            -DestinationPath "MouseStatus_${{ matrix.arch_name }}.zip" -Force
+          Get-ChildItem *.zip | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MouseStatus_${{ matrix.arch_name }}
+          path: MouseStatus_${{ matrix.arch_name }}.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/MouseStatus_V')
+    runs-on: ubuntu-latest
+    name: Publish release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -l artifacts
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            artifacts/MouseStatus_x64.zip \
+            artifacts/MouseStatus_x86.zip \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "MouseStatus ${GITHUB_REF_NAME}" \
+            --generate-notes
