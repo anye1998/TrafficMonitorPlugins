@@ -19,7 +19,8 @@ extern "C"
 namespace {
 
 constexpr DWORD kReportBudgetMs = 600;           // 每轮最多等待被动上报的时长
-constexpr ULONGLONG kProbeIntervalMs = 3000;     // 无上报时活性探测的间隔（别太密，命令会吵醒鼠标）
+constexpr ULONGLONG kProbeIntervalMs = 1800;     // 无上报时活性探测的间隔
+constexpr ULONGLONG kProbeIntervalOfflineMs = 3000;  // 已经判定离线后放宽，避免对着不存在的设备猛问
 constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔（仅在句柄确实失效后）
 constexpr ULONGLONG kHidRescanMs = 8000;         // 通用 HID 候选重新枚举的间隔
 constexpr ULONGLONG kBluetoothRescanMs = 6000;   // 蓝牙电量属性重新查询的间隔
@@ -31,19 +32,22 @@ constexpr ULONGLONG kBluetoothRescanMs = 6000;   // 蓝牙电量属性重新查�
 //     偶发最慢约 800ms；连续 203 次全部成功。
 //   - 鼠标关着：5 秒窗口内 45 次全部拿不到应答（首字节恒为 0x02）。
 //     v1.0.14 之所以判不出来，就是因为只睡了 30/60ms 便读一次，远早于 270ms。
-// 所以必须「轮询到窗口末尾」，窗口取 1.6 秒（覆盖 800ms 的最坏延迟再留一倍余量）。
-constexpr DWORD kRapooProbeWindowMs = 1600;
+// 所以必须「轮询到窗口末尾」。窗口取 2 秒：既覆盖 800ms 的最坏延迟留足余量，
+// 又让「关机 → 判定」这一步只花一次窗口的时间（见下面的阈值）。
+// 另外实测探测间隔不能短于约 1.5 秒：1.3 秒间隔时会在鼠标明明开着的情况下连续失败，
+// 2 秒间隔则 30/30 成功（延迟 267~516ms）。所以探测频率按 1.8 秒控制，不能再密。
+constexpr DWORD kRapooProbeWindowMs = 2000;
 constexpr DWORD kRapooProbePollMs = 20;
 constexpr BYTE kProbeAck = 0x01;                 // 应答就绪
 constexpr BYTE kProbeNack = 0x02;                // 设备未应答（关机 / 未唤醒）
 
 // 雷柏鼠标「多久没有任何证据算断开」
 //
-// 探测可用时：每 3 秒探一次，连续 3 次没应答（约 9.5 秒）判离线。
-//   这个阈值既能扛住「鼠标静置几秒不发报文」，又能在关机后 10 秒内翻成离线。
+// 探测可用时：3 秒。一次探测最长 2 秒，所以「关机」从最后一次上报算起约 4 秒内翻成离线
+//   （旧版靠「一次探测失败就断开」做到 3 秒，但那会把静置误报成断开）。
 // 探测不可用时（个别机型不支持特性通道）：退回纯「无上报」判定，60 秒。
 //   实测鼠标静置时最长 3 分钟不发一帧，这类机型本来就没法准确判断，宁可慢也不误报。
-constexpr ULONGLONG kRapooOfflineWithProbeMs = 9500;
+constexpr ULONGLONG kRapooOfflineWithProbeMs = 3000;
 constexpr ULONGLONG kRapooOfflineNoProbeMs = 60000;
 constexpr int kProbeFailStreakLimit = 3;         // 连续失败这么多次就写一条日志说明
 
@@ -921,7 +925,11 @@ SourceResult CMouseMonitor::PollRapoo()
     bool probe_ok = false;
     bool probed = false;
     const ULONGLONG probe_now = ::GetTickCount64();
-    const bool probe_due = (m_probe_tick == 0) || (probe_now - m_probe_tick >= kProbeIntervalMs);
+    // 在线时按 1.8 秒探（关机要在 4 秒内发现）；已经判定离线后放宽到 3 秒，
+    // 免得对着一台根本没应答的设备每两秒问一次。鼠标重新打开时它会自己开始上报，
+    // 不依赖探测也能立刻恢复。
+    const ULONGLONG probe_gap = m_rapoo_alive ? kProbeIntervalMs : kProbeIntervalOfflineMs;
+    const bool probe_due = (m_probe_tick == 0) || (probe_now - m_probe_tick >= probe_gap);
     if (!got_report && !just_opened && probe_due && m_h_control != INVALID_HANDLE_VALUE
         && m_h_feature != INVALID_HANDLE_VALUE)
     {
