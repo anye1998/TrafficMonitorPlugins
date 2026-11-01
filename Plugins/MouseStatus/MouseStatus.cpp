@@ -198,7 +198,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.5";
+        return L"1.0.6";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:
@@ -210,6 +210,17 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
 void CMouseStatus::OnInitialize(ITrafficMonitor* pApp)
 {
     m_app = pApp;
+    // 监视线程等 EI_CONFIG_DIR 到了再启动：那时才知道 ini 放在哪，
+    // 免得刚启动时用默认值写几条日志才发现用户其实关掉了日志。
+}
+
+void CMouseStatus::OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data)
+{
+    // 主程序把 <配置目录>\plugins\ 传进来，配置就存在那里的 MouseStatus.ini，
+    // 与 Battery / DateTime / KeyboardIndicator 等插件的做法一致。
+    if (index == ITMPlugin::EI_CONFIG_DIR && data != nullptr && data[0] != L'\0')
+        diag::SetConfigDir(data);
+
     EnsureStarted();
 }
 

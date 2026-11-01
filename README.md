@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.5](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.5)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.6](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.6)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.5**，
-下载：[MouseStatus V1.0.5](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.5)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.6**，
+下载：[MouseStatus V1.0.6](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.6)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -147,10 +147,20 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 | 立即写入诊断信息 | 把当前 HID 接口清单、雷柏端点、蓝牙电量一次性写进日志（日志关着会自动打开） |
 
 菜单里的「插件设置」会打开一个设置对话框，里面是同样的功能：日志开关、日志路径、
-当前文件大小、打开文件夹、清空日志、立即写入诊断。
+当前文件大小、插件配置文件路径、打开文件夹、清空日志、立即写入诊断。
 
-日志开关持久化在注册表 `HKEY_CURRENT_USER\Software\MouseStatus` 的 `EnableLog`
-（DWORD，1 开 / 0 关）。另外环境变量 `MOUSESTATUS_NOLOG=1` 可以强制关闭，优先级最高。
+日志开关存在 **`<TrafficMonitor>\plugins\MouseStatus.ini`**（和 Battery、DateTime、
+KeyboardIndicator 等插件放在同一个目录，配置方式也一致）：
+
+```ini
+[config]
+enable_log=1
+```
+
+V1.0.6 之前存在注册表 `HKEY_CURRENT_USER\Software\MouseStatus` 的 `EnableLog`。
+升级后第一次运行会自动把旧值迁移到 ini 并**删除该注册表键**，插件此后不再写注册表。
+
+另外环境变量 `MOUSESTATUS_NOLOG=1` 可以强制关闭，优先级最高。
 
 > 关闭日志后插件不再写任何文件；恢复默认只需重新勾选一次。
 
@@ -251,7 +261,8 @@ rem 产物：bin\x64\Release\MouseStatus.dll
 
 | 版本 | 变更 |
 |---|---|
-| **V1.0.5** | 按真机报文解析出充电标志位（`buf[7]` 的 bit1），「2.4G 连接 + 插着充电线」现在能正确显示 `充电中`；断连时清空充电位 |
+| **V1.0.6** | 设置项改用 `plugins\MouseStatus.ini` 保存（与其它插件统一），不再写注册表；升级时自动迁移旧值并清理注册表残留；设置窗口改为按显示器工作区居中，不再跑到屏幕最下方/屏幕外 |
+| V1.0.5 | 按真机报文解析出充电标志位（`buf[7]` 的 bit1），「2.4G 连接 + 插着充电线」现在能正确显示 `充电中`；断连时清空充电位 |
 | V1.0.4 | 原始报文记录改为「启动记 20 帧 + 内容变化即记 + 30 秒心跳」，不再按进程生命周期截断；日志行补 `buf7` / `buf9`，便于比对插拔充电线前后的字节差异 |
 | V1.0.3 | 连接方式改由 PID 前缀判定（VT3 在 2.4G 下报文里也有 `0x10`，旧版据此误判成「USB 有线 / 充电中」）；新增日志开关与「清空日志」设置项 |
 | V1.0.2 | 修复雷柏端点选错集合：改为按 Usage `0x0002` 精确选取状态通道（原先会挑中 33 字节的配置/升级通道，一个状态报文都收不到），状态读请求改为跨轮次挂起避免漏帧 |

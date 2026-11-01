@@ -18,6 +18,7 @@ public:
     virtual void DataRequired() override;
     virtual const wchar_t* GetInfo(PluginInfoIndex index) override;
     virtual void OnInitialize(ITrafficMonitor* pApp) override;
+    virtual void OnExtenedInfo(ExtendedInfoIndex index, const wchar_t* data) override;
     virtual void* GetPluginIcon() override;
 
     // 设置界面：右键菜单里的命令 + 「插件设置」对话框

@@ -9,15 +9,17 @@
 
 namespace {
 
-constexpr int kCmdToggleLog = 0;
-constexpr int kCmdClearLog = 1;
-constexpr int kCmdOpenFolder = 2;
-constexpr int kCmdDumpNow = 3;
+// 客户区设计尺寸（96 DPI），实际尺寸按所在显示器的 DPI 缩放
+constexpr int kClientWidth = 440;
+constexpr int kClientHeight = 240;
 
 const wchar_t* const kWindowClass = L"MouseStatusOptionsWindow";
 
 // 取本 DLL 的模块句柄（不能依赖 MFC 的 AfxGetInstanceHandle）
 char g_options_anchor = 0;
+
+// 防止连点右键重复打开多个设置窗口
+bool g_opened = false;
 
 // 子控件
 enum : int
@@ -25,6 +27,7 @@ enum : int
     IDC_CHK_LOG = 1001,
     IDC_EDIT_PATH,
     IDC_STATIC_SIZE,
+    IDC_EDIT_INI,
     IDC_BTN_OPEN,
     IDC_BTN_CLEAR,
     IDC_BTN_DUMP,
@@ -37,6 +40,7 @@ struct OptionsUi
     HWND chk_log{ nullptr };
     HWND edit_path{ nullptr };
     HWND static_size{ nullptr };
+    HWND edit_ini{ nullptr };
     bool initial{ true };
     bool changed{ false };
     bool done{ false };
@@ -83,9 +87,11 @@ HWND MakeChild(OptionsUi* ui, const wchar_t* cls, const wchar_t* text, DWORD sty
 
 void CreateChildren(OptionsUi* ui)
 {
+    const int inner = kClientWidth - 32;   // 左右各留 16
+
     // 顶部说明
     MakeChild(ui, L"STATIC", L"诊断日志用于排查「读不到电量」这类问题，默认开启。",
-        SS_LEFT, 0, 16, 14, 388, 18, -1);
+        SS_LEFT, 0, 16, 14, inner, 18, -1);
 
     ui->chk_log = MakeChild(ui, L"BUTTON", L"启用诊断日志",
         BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 38, 300, 22, IDC_CHK_LOG);
@@ -93,21 +99,28 @@ void CreateChildren(OptionsUi* ui)
         ::SendMessageW(ui->chk_log, BM_SETCHECK,
             diag::Enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 68, 388, 16, -1);
-
+    // 日志文件
+    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 68, inner, 16, -1);
     ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 86, 388, 24, IDC_EDIT_PATH);
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 86, inner, 24, IDC_EDIT_PATH);
 
-    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 116, 388, 16, IDC_STATIC_SIZE);
+    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 116, inner, 16, IDC_STATIC_SIZE);
     RefreshSizeLabel(ui);
 
-    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 146, 100, 28,
+    // 配置文件（ini）—— 和 Battery / DateTime 等插件放在同一个目录
+    MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关保存在这里）：", SS_LEFT, 0,
+        16, 142, inner, 16, -1);
+    ui->edit_ini = MakeChild(ui, L"EDIT", diag::ConfigFilePath().c_str(),
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 160, inner, 24, IDC_EDIT_INI);
+
+    // 按钮行
+    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 196, 96, 28,
         IDC_BTN_OPEN);
-    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 124, 146, 100, 28,
+    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 196, 96, 28,
         IDC_BTN_CLEAR);
-    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 232, 146, 110, 28,
+    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 196, 110, 28,
         IDC_BTN_DUMP);
-    MakeChild(ui, L"BUTTON", L"关闭", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 348, 146, 56, 28,
+    MakeChild(ui, L"BUTTON", L"关闭", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 352, 196, 72, 28,
         IDC_BTN_CLOSE);
 }
 
@@ -215,10 +228,41 @@ void RegisterClassOnce(HINSTANCE instance)
     ::RegisterClassExW(&wc);
 }
 
+// 取某窗口所在显示器的 DPI；取不到时退回主屏 DPI
+int QueryDpi(HWND hwnd)
+{
+    using PFN_GetDpiForWindow = UINT(WINAPI*)(HWND);
+
+    if (hwnd != nullptr)
+    {
+        HMODULE user32 = ::GetModuleHandleW(L"user32.dll");
+        if (user32 != nullptr)
+        {
+            auto fn = (PFN_GetDpiForWindow)(void*)::GetProcAddress(user32, "GetDpiForWindow");
+            if (fn != nullptr)
+            {
+                const UINT dpi = fn(hwnd);
+                if (dpi > 0)
+                    return (int)dpi;
+            }
+        }
+    }
+
+    HDC screen = ::GetDC(nullptr);
+    if (screen == nullptr)
+        return 96;
+    const int dpi = ::GetDeviceCaps(screen, LOGPIXELSY);
+    ::ReleaseDC(nullptr, screen);
+    return dpi > 0 ? dpi : 96;
+}
+
 } // namespace
 
 bool ShowMouseStatusOptions(void* parent)
 {
+    if (g_opened)
+        return false;
+
     HWND parent_wnd = (HWND)parent;
     if (parent_wnd != nullptr && !::IsWindow(parent_wnd))
         parent_wnd = nullptr;
@@ -237,50 +281,63 @@ bool ShowMouseStatusOptions(void* parent)
     ui.initial = diag::Enabled();
     ui.changed = false;
 
-    HDC screen = ::GetDC(nullptr);
-    if (screen != nullptr)
-    {
-        const int dpi = ::GetDeviceCaps(screen, LOGPIXELSY);
-        if (dpi > 0)
-            ui.scale = ::MulDiv(dpi, 100, 96);
-        ::ReleaseDC(nullptr, screen);
-    }
+    const int dpi = QueryDpi(parent_wnd);
+    ui.scale = ::MulDiv(dpi, 100, 96);
     if (ui.scale < 100)
         ui.scale = 100;
 
-    // 布局按「客户区 420x192」设计，这里换算成含标题栏的整窗尺寸
+    // 布局按「客户区 440x240」设计，这里换算成含标题栏的整窗尺寸
     const DWORD win_style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
     const DWORD win_ex_style = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
-    RECT frame = { 0, 0, MulDiv(420, ui.scale, 100), MulDiv(192, ui.scale, 100) };
+    RECT frame = { 0, 0, MulDiv(kClientWidth, ui.scale, 100), MulDiv(kClientHeight, ui.scale, 100) };
     ::AdjustWindowRectEx(&frame, win_style, FALSE, win_ex_style);
     const int width = frame.right - frame.left;
     const int height = frame.bottom - frame.top;
 
-    RECT parent_rect;
-    ::ZeroMemory(&parent_rect, sizeof(parent_rect));
-    if (parent_wnd != nullptr)
-        ::GetWindowRect(parent_wnd, &parent_rect);
-    else
-    {
-        parent_rect.left = 0;
-        parent_rect.top = 0;
-        parent_rect.right = ::GetSystemMetrics(SM_CXSCREEN);
-        parent_rect.bottom = ::GetSystemMetrics(SM_CYSCREEN);
-    }
-    const int x = parent_rect.left + ((parent_rect.right - parent_rect.left) - width) / 2;
-    const int y = parent_rect.top + ((parent_rect.bottom - parent_rect.top) - height) / 2;
+    // 定位：以父窗口所在**显示器的工作区**为基准居中，并夹紧在工作区内。
+    // 之前直接按父窗口矩形居中 —— 而「插件设置」是从任务栏窗口的右键菜单打开的，
+    // 任务栏窗口只有几十像素高、贴在屏幕底部，居中后整个对话框就掉到屏幕最下方、
+    // 有一半跑到屏幕外面。改用工作区居中即可彻底避开这个问题。
+    HMONITOR monitor = ::MonitorFromWindow(
+        parent_wnd != nullptr ? parent_wnd : ::GetDesktopWindow(), MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi;
+    ::ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(mi);
 
+    RECT work;
+    if (::GetMonitorInfoW(monitor, &mi))
+        work = mi.rcWork;
+    else
+        ::SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+
+    int x = work.left + (((work.right - work.left) - width) / 2);
+    int y = work.top + (((work.bottom - work.top) - height) / 2);
+
+    // 夹紧：绝不让窗口越过工作区边界（分辨率特别小或 DPI 特别大时也能完整显示）
+    if (x + width > work.right)
+        x = work.right - width;
+    if (y + height > work.bottom)
+        y = work.bottom - height;
+    if (x < work.left)
+        x = work.left;
+    if (y < work.top)
+        y = work.top;
+
+    g_opened = true;
     HWND hwnd = ::CreateWindowExW(win_ex_style, kWindowClass, L"MouseStatus 设置",
-        win_style, x < 0 ? 0 : x, y < 0 ? 0 : y, width, height, parent_wnd,
-        nullptr, module, &ui);
+        win_style, x, y, width, height, parent_wnd, nullptr, module, &ui);
     if (hwnd == nullptr)
+    {
+        g_opened = false;
         return false;
+    }
 
     if (parent_wnd != nullptr)
         ::EnableWindow(parent_wnd, FALSE);
 
     ::ShowWindow(hwnd, SW_SHOW);
     ::UpdateWindow(hwnd);
+    ::SetForegroundWindow(hwnd);
     ::SetFocus(hwnd);
 
     MSG msg;
@@ -317,5 +374,6 @@ bool ShowMouseStatusOptions(void* parent)
     if (quit)
         ::PostQuitMessage((int)msg.wParam);
 
+    g_opened = false;
     return ui.changed;
 }

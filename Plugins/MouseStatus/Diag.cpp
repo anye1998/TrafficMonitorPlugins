@@ -15,14 +15,24 @@ namespace {
 
 constexpr ULONGLONG kMaxLogBytes = 1024 * 1024;   // 超过 1 MB 时滚转为 .old
 
-const wchar_t* const kRegKey = L"Software\\MouseStatus";
-const wchar_t* const kRegValueEnableLog = L"EnableLog";
+// 配置项都放在 ini 的 [config] 段，与 Battery / DateTime 等插件一致
+const wchar_t* const kIniSection = L"config";
+const wchar_t* const kIniKeyEnableLog = L"enable_log";
+const wchar_t* const kIniFileName = L"MouseStatus.ini";
+
+// v1.0.5 及更早版本把日志开关存在这里，现已改用 ini，仅在迁移时读取一次并清理
+const wchar_t* const kLegacyRegKey = L"Software\\MouseStatus";
+const wchar_t* const kLegacyRegValue = L"EnableLog";
+
+// 取本 DLL 的模块句柄（不能依赖 MFC 的 AfxGetInstanceHandle）
+char g_diag_anchor = 0;
 
 struct DiagState
 {
     CRITICAL_SECTION cs;
     std::wstring path;
     std::wstring dir;
+    std::wstring ini_path;
     bool path_ready = false;
     bool enabled = true;
     bool hard_disabled = false;    // 环境变量强制关闭
@@ -55,39 +65,113 @@ DiagState& State()
     return *s;
 }
 
-bool ReadRegEnabled(bool& value)
+std::wstring ModuleDirectory()
 {
-    HKEY key = nullptr;
-    if (::RegOpenKeyExW(HKEY_CURRENT_USER, kRegKey, 0, KEY_READ, &key) != ERROR_SUCCESS)
+    HMODULE module = nullptr;
+    if (!::GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCWSTR)&g_diag_anchor, &module))
+    {
+        return std::wstring();
+    }
+
+    wchar_t path[MAX_PATH] = { 0 };
+    if (::GetModuleFileNameW(module, path, MAX_PATH) == 0)
+        return std::wstring();
+
+    std::wstring full = path;
+    const size_t pos = full.find_last_of(L"\\/");
+    if (pos == std::wstring::npos)
+        return std::wstring();
+    return full.substr(0, pos + 1);
+}
+
+// ini 路径：优先用主程序给的配置目录，其次退到本 DLL 所在目录
+std::wstring ResolveIniPath(DiagState& st)
+{
+    if (!st.ini_path.empty())
+        return st.ini_path;
+    return ModuleDirectory() + kIniFileName;
+}
+
+// 读 ini 里的日志开关；键不存在时返回 false（调用方决定用默认值）
+bool ReadIniEnabled(DiagState& st, bool& value)
+{
+    const std::wstring ini = ResolveIniPath(st);
+    if (ini.empty())
         return false;
 
-    DWORD data = 0;
-    DWORD size = sizeof(data);
-    DWORD type = 0;
-    const bool ok = (::RegQueryValueExW(key, kRegValueEnableLog, nullptr, &type,
-                         (LPBYTE)&data, &size)
-                        == ERROR_SUCCESS)
-        && type == REG_DWORD;
-    ::RegCloseKey(key);
-    if (!ok)
+    if (::GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
         return false;
 
-    value = (data != 0);
+    wchar_t buf[16] = { 0 };
+    const DWORD got = ::GetPrivateProfileStringW(kIniSection, kIniKeyEnableLog, L"",
+        buf, (DWORD)(sizeof(buf) / sizeof(buf[0])), ini.c_str());
+    if (got == 0 || buf[0] == L'\0')
+        return false;
+
+    value = (buf[0] != L'0');
     return true;
 }
 
-void WriteRegEnabled(bool value)
+void WriteIniEnabled(DiagState& st, bool value)
+{
+    const std::wstring ini = ResolveIniPath(st);
+    if (ini.empty())
+        return;
+    ::WritePrivateProfileStringW(kIniSection, kIniKeyEnableLog, value ? L"1" : L"0", ini.c_str());
+}
+
+// v1.0.5 及更早版本把开关存在注册表里。这里做一次性迁移：
+//   1) ini 还没有该键时，把注册表的旧值搬过来，避免升级后设置丢失；
+//   2) 删掉整个 HKCU\Software\MouseStatus —— 插件之后只在 ini 里存配置。
+void MigrateLegacyRegistry(DiagState& st, bool& value, bool& has_value)
 {
     HKEY key = nullptr;
-    if (::RegCreateKeyExW(HKEY_CURRENT_USER, kRegKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key,
-            nullptr)
-        != ERROR_SUCCESS)
+    if (::RegOpenKeyExW(HKEY_CURRENT_USER, kLegacyRegKey, 0, KEY_READ, &key) == ERROR_SUCCESS)
     {
-        return;
+        DWORD data = 0;
+        DWORD size = sizeof(data);
+        DWORD type = 0;
+        const bool ok = (::RegQueryValueExW(key, kLegacyRegValue, nullptr, &type,
+                            (LPBYTE)&data, &size)
+                            == ERROR_SUCCESS)
+            && type == REG_DWORD;
+        ::RegCloseKey(key);
+
+        if (ok && !has_value)
+        {
+            value = (data != 0);
+            has_value = true;
+            WriteIniEnabled(st, value);
+        }
     }
-    const DWORD data = value ? 1u : 0u;
-    ::RegSetValueExW(key, kRegValueEnableLog, 0, REG_DWORD, (const BYTE*)&data, sizeof(data));
-    ::RegCloseKey(key);
+
+    // 无论上面有没有读到值，都把旧键清掉（不存在时静默返回错误，忽略即可）
+    ::RegDeleteTreeW(HKEY_CURRENT_USER, kLegacyRegKey);
+}
+
+// 加载配置（调用方必须已持有锁）
+void LoadSettings(DiagState& st)
+{
+    if (st.settings_loaded)
+        return;
+    st.settings_loaded = true;
+
+    bool value = true;
+    bool has_value = ReadIniEnabled(st, value);
+
+    MigrateLegacyRegistry(st, value, has_value);
+
+    if (!has_value)
+    {
+        // 两个来源都没有：用默认值，并立刻把 ini 落盘，
+        // 这样插件目录里能直接看到配置文件，和别的插件的习惯一致。
+        value = true;
+        WriteIniEnabled(st, true);
+    }
+
+    st.enabled = st.hard_disabled ? false : value;
 }
 
 // 取 %LOCALAPPDATA%\MouseStatus，失败则退到 %TEMP%
@@ -179,19 +263,38 @@ std::string ToUtf8(const wchar_t* text, int len)
 
 namespace diag {
 
+void SetConfigDir(const std::wstring& dir)
+{
+    if (dir.empty())
+        return;
+
+    std::wstring normalized = dir;
+    if (normalized.back() != L'\\' && normalized.back() != L'/')
+        normalized += L'\\';
+
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    const bool changed = (st.ini_path != normalized + kIniFileName);
+    st.ini_path = normalized + kIniFileName;
+    if (changed)
+        st.settings_loaded = false;   // 让下一次 Enabled() 重新按 ini 加载
+    ::LeaveCriticalSection(&st.cs);
+}
+
+std::wstring ConfigFilePath()
+{
+    DiagState& st = State();
+    ::EnterCriticalSection(&st.cs);
+    std::wstring p = ResolveIniPath(st);
+    ::LeaveCriticalSection(&st.cs);
+    return p;
+}
+
 bool Enabled()
 {
     DiagState& st = State();
     ::EnterCriticalSection(&st.cs);
-    if (!st.settings_loaded)
-    {
-        st.settings_loaded = true;
-        bool reg_value = true;
-        if (!st.hard_disabled && ReadRegEnabled(reg_value))
-            st.enabled = reg_value;
-        if (st.hard_disabled)
-            st.enabled = false;
-    }
+    LoadSettings(st);
     const bool value = st.enabled;
     ::LeaveCriticalSection(&st.cs);
     return value;
@@ -204,9 +307,8 @@ void SetEnabled(bool enabled)
     st.settings_loaded = true;
     st.enabled = st.hard_disabled ? false : enabled;
     const bool write_value = st.enabled;
+    WriteIniEnabled(st, write_value);
     ::LeaveCriticalSection(&st.cs);
-
-    WriteRegEnabled(write_value);
 }
 
 std::wstring LogFilePath()

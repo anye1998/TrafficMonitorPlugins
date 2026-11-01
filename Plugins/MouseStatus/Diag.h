@@ -6,7 +6,8 @@
 //
 // 日志位置：%LOCALAPPDATA%\MouseStatus\MouseStatus.log（UTF-8 带 BOM，可直接用记事本打开）
 // 开关：插件右键菜单 / 设置对话框里的「启用诊断日志」，持久化在
-//       HKEY_CURRENT_USER\Software\MouseStatus 的 EnableLog。
+//       <TrafficMonitor 配置目录>\plugins\MouseStatus.ini 的 [config] enable_log，
+//       与 Battery / DateTime / KeyboardIndicator 等插件的 ini 配置方式保持一致。
 // 另外环境变量 MOUSESTATUS_NOLOG=1 可以作为强制关闭的兜底。
 #pragma once
 
@@ -14,16 +15,24 @@
 
 namespace diag {
 
+// 设置配置文件所在目录（主程序通过 ITMPlugin::EI_CONFIG_DIR 传入）。
+// 必须在首次读取配置前调用；重复调用会重新加载 ini。
+// dir 需以反斜杠结尾，例如 "D:\Tools\TrafficMonitor\plugins\"。
+void SetConfigDir(const std::wstring& dir);
+
+// ini 配置文件的完整路径；尚未收到配置目录时返回空串
+std::wstring ConfigFilePath();
+
 // 日志文件的完整路径；首次调用时初始化目录
 std::wstring LogFilePath();
 
 // 日志所在目录（不含文件名）
 std::wstring LogDirectory();
 
-// 用户设置里的日志开关（每次调用都读一次运行时值，不做磁盘 IO）
+// 用户设置里的日志开关（结果缓存在内存里，不做磁盘 IO）
 bool Enabled();
 
-// 修改日志开关，并写入注册表持久化
+// 修改日志开关，并写入 ini 持久化
 void SetEnabled(bool enabled);
 
 // 删除 MouseStatus.log 与 MouseStatus.log.old，返回是否全部删干净
