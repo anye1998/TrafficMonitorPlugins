@@ -276,10 +276,11 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                     ::SendMessageW(ui->chk_log, BM_SETCHECK, BST_CHECKED, 0);
                 ui->changed = (true != ui->initial);
             }
-            CMouseMonitor::Instance().DumpDiagnosticsOnce();
+            // 交给工作线程执行，避免和采集线程并发枚举 / 并发改报文记录状态
+            CMouseMonitor::Instance().RequestDiagnosticsDump();
             RefreshSizeLabel(ui);
-            ::MessageBoxW(hwnd, L"已把当前设备信息写入日志文件。", L"MouseStatus",
-                MB_ICONINFORMATION | MB_OK);
+            ::MessageBoxW(hwnd, L"已请求把当前设备信息写入日志（采集线程会立即执行）。",
+                L"MouseStatus", MB_ICONINFORMATION | MB_OK);
             return 0;
         }
         if (id == IDC_BTN_CLOSE)

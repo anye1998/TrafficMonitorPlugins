@@ -323,10 +323,10 @@ A generic HTTP / JSON fetcher plugin for [TrafficMonitor](https://github.com/zho
 
 Displays the battery level and link type of a wireless or Bluetooth mouse on the taskbar. Supports Bluetooth (classic and Low Energy), 2.4G receivers and USB wired connection, and distinguishes "charging" from "fully charged".
 
-* Version: V1.00
+* Version: V1.0.17
 * Author: [anye1998](https://github.com/anye1998)
 * Homepage: [anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins)
-* Download url: [MouseStatus_V1.0.16 · anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.16)
+* Download url: [MouseStatus_V1.0.17 · anye1998/TrafficMonitorPlugins](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.17)
 
 Note: this plugin is maintained in this fork only; there is no matching entry in the upstream `zhongyang219/TrafficMonitorPlugins`. Implementation details: [README](../README.md#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式).
 

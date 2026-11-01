@@ -22,8 +22,11 @@ constexpr DWORD kReportBudgetMs = 600;           // 每轮最多等待被动上�
 constexpr ULONGLONG kProbeIntervalMs = 1800;     // 无上报时活性探测的间隔
 constexpr ULONGLONG kProbeIntervalOfflineMs = 3000;  // 已经判定离线后放宽，避免对着不存在的设备猛问
 constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔（仅在句柄确实失效后）
-constexpr ULONGLONG kHidRescanMs = 8000;         // 通用 HID 候选重新枚举的间隔
-constexpr ULONGLONG kBluetoothRescanMs = 6000;   // 蓝牙电量属性重新查询的间隔
+// 重新枚举的间隔不宜太短：每扫一次 HID 就要打开系统里所有 HID 接口，
+// 每扫一次蓝牙就要枚举全部 PnP 节点。设备插拔本来就会改变这两份清单，
+// 15 秒 / 10 秒足够及时，又比原来的 8 秒 / 6 秒少一半以上的重复枚举。
+constexpr ULONGLONG kHidRescanMs = 15000;        // 通用 HID 候选重新枚举的间隔
+constexpr ULONGLONG kBluetoothRescanMs = 10000;  // 蓝牙电量属性重新查询的间隔
 
 // 主动探测（读寄存器）等应答的窗口与轮询步长
 //
@@ -45,10 +48,12 @@ constexpr BYTE kProbeNack = 0x02;                // 设备未应答（关机 / �
 //
 // 探测可用时：3 秒。一次探测最长 2 秒，所以「关机」从最后一次上报算起约 4 秒内翻成离线
 //   （旧版靠「一次探测失败就断开」做到 3 秒，但那会把静置误报成断开）。
-// 探测不可用时（个别机型不支持特性通道）：退回纯「无上报」判定，60 秒。
-//   实测鼠标静置时最长 3 分钟不发一帧，这类机型本来就没法准确判断，宁可慢也不误报。
+// 探测不可用时（个别机型不支持特性通道）：退回纯「无上报」判定，见下面的
+//   kRapooOfflineNoProbeMs。这类机型本来就没法准确判断，宁可慢也不误报。
 constexpr ULONGLONG kRapooOfflineWithProbeMs = 3000;
-constexpr ULONGLONG kRapooOfflineNoProbeMs = 60000;
+// 探测不可用、只能看沉默时长时取 4 分钟：实测雷柏鼠标静置最长 3 分钟才发一帧，
+// 阈值必须比它长，否则「静置」又会被误报成「断开」。代价是这类机型关机后要慢一些才变 --。
+constexpr ULONGLONG kRapooOfflineNoProbeMs = 240000;
 constexpr int kProbeFailStreakLimit = 3;         // 连续失败这么多次就写一条日志说明
 
 // 主循环周期。默认与 TrafficMonitor 的采集间隔（general.monitor_time_span，默认 1000）对齐：
@@ -211,7 +216,11 @@ void CMouseMonitor::Start()
     m_read_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
     m_wake = ::CreateEventW(nullptr, FALSE, FALSE, nullptr);   // 自动复位
     if (m_stop == nullptr || m_read_event == nullptr || m_wake == nullptr)
+    {
+        // 事件没建齐就退干净，否则下次 Start 会覆盖并泄漏已有句柄
+        Stop();
         return;
+    }
 
     ::ZeroMemory(&m_ov, sizeof(m_ov));
     m_ov.hEvent = m_read_event;
@@ -219,7 +228,7 @@ void CMouseMonitor::Start()
     m_running = true;
     m_thread = ::CreateThread(nullptr, 0, &CMouseMonitor::ThreadProc, this, 0, nullptr);
     if (m_thread == nullptr)
-        m_running = false;
+        Stop();
 }
 
 void CMouseMonitor::Stop()
@@ -306,7 +315,10 @@ void CMouseMonitor::Run()
 #endif
     diag::Log(L"=== MouseStatus %s 启动，日志：%s ===", arch, diag::LogFilePath().c_str());
 
-    DumpDiagnosticsOnce();
+    // 全量诊断要枚举所有 HID 接口、雷柏端点与全部 PnP 节点，只在日志开启时做；
+    // 日志关闭时这些结果都会被 Log 丢掉，枚举的代价却照付，启动会白白变慢。
+    if (diag::Enabled())
+        DumpDiagnosticsOnce();
 
     int period_ms = ResolveLoopPeriodMs();
     ::InterlockedExchange((volatile LONG*)&m_period_ms, (LONG)period_ms);
@@ -315,6 +327,11 @@ void CMouseMonitor::Run()
 
     while (::WaitForSingleObject(m_stop, 0) == WAIT_TIMEOUT)
     {
+        // UI 线程的「立即写入诊断」只置标志，真正的枚举放在工作线程里做，
+        // 这样不会和本线程正在维护的报文记录状态并发。
+        if (::InterlockedExchange((volatile LONG*)&m_dump_requested, 0) != 0)
+            DumpDiagnosticsOnce();
+
         const ULONGLONG round_begin = ::GetTickCount64();
 
         // 三个数据源每轮都跑，谁有电量用谁；不再「先到先得」短路后备链路
@@ -495,6 +512,17 @@ void CMouseMonitor::DumpDiagnosticsOnce()
     // 用户按下「立即写入诊断信息」时，顺带重置报文记录预算：
     // 接下来 20 帧（约 1 分钟）的雷柏报文会被完整写进日志，方便复现插拔充电线这类操作。
     m_report_dump_budget = 20;
+}
+
+void CMouseMonitor::RequestDiagnosticsDump()
+{
+    // 线程还没起来就先把线程拉起来，否则这个请求永远不会被消费
+    if (!m_running)
+        Start();
+
+    ::InterlockedExchange((volatile LONG*)&m_dump_requested, 1);
+    if (m_wake != nullptr)
+        ::SetEvent(m_wake);   // 打断本轮睡眠，点完按钮就能很快看到结果
 }
 
 /////////////////////////////////////////////////////////////////////////////////////////////
@@ -858,7 +886,10 @@ bool CMouseMonitor::ProbeRapooAlive()
         {
             last_code = reply[0];
             if (last_code == kProbeAck)
+            {
+                m_probe_last_code = last_code;
                 return true;
+            }
         }
         else
         {
@@ -965,11 +996,11 @@ SourceResult CMouseMonitor::PollRapoo()
             diag::Log(L"雷柏活性探测连续失败 %d 次（最近一次应答首字节=0x%02X）",
                 m_probe_fail_streak, m_probe_last_code);
 
-        // 探测可用就用 9.5 秒；探测从未成功过则看情况：
+        // 探测可用就用 3 秒；探测从未成功过则看情况：
         //   - 收到过上报：设备确实活着，只是这台机器的特性通道不认这条命令，
-        //     只能靠沉默时长判断，退回 60 秒（宁可慢，不能把静置误报成断开）。
-        //   - 一帧上报都没收到过：多半是启动时鼠标就是关的，仍按 9.5 秒判离线，
-        //     否则要干等一分钟才显示「未连接」。
+        //     只能靠沉默时长判断，退回 4 分钟（宁可慢，不能把静置误报成断开）。
+        //   - 一帧上报都没收到过：多半是启动时鼠标就是关的，仍按 3 秒判离线，
+        //     否则要干等几分钟才显示「未连接」。
         const ULONGLONG grace = ProbeTrusted()
             ? kRapooOfflineWithProbeMs
             : (m_saw_report ? kRapooOfflineNoProbeMs : kRapooOfflineWithProbeMs);
@@ -1014,7 +1045,7 @@ bool CMouseMonitor::ProbeTrusted() const
 {
     // 只在「这次绑定期间成功过」时相信探测的负面结论。
     // 一旦相信，就不再因为后来的连续失败而反悔：否则鼠标关机时探测必然失败，
-    // 反悔会让阈值从 9.5 秒退回 60 秒，反而更晚才能显示「未连接」。
+    // 反悔会让阈值从 3 秒退回 4 分钟，反而更晚才能显示「未连接」。
     return m_probe_ok_tick != 0;
 }
 
@@ -1088,6 +1119,7 @@ void CMouseMonitor::ScanHidCandidates()
         candidate.transport = item.info.transport;
         candidate.vid = item.info.vid;
         candidate.pid = item.info.pid;
+        candidate.battery = item.result.battery_percent;   // 扫描时已经读过一次
         m_candidates.push_back(candidate);
     }
 
@@ -1126,7 +1158,7 @@ void CMouseMonitor::ScanHidCandidates()
             return rank(a) < rank(b);
         });
 
-    // 每 8 秒扫一次，清单没变化就不重复写日志，避免长期开着日志把文件刷大。
+    // 每次重扫（默认 15 秒）只在清单变化时写日志，避免长期开着日志把文件刷大。
     // 指纹里带数量前缀：清单为空时也能与"还没扫过"区分开（否则空清单永远不会写一行，
     // 排查时就看不到"确实扫过、但一个候选都没有"这个关键事实）。
     std::wstring sig = std::to_wstring(m_candidates.size());
@@ -1173,16 +1205,18 @@ SourceResult CMouseMonitor::PollHidBattery()
         ScanHidCandidates();
     }
 
+    // 电量直接用 m_hid_scan_tick 那一轮扫描时读到的那一份，不再每轮重新读：
+    // 之前的写法每秒都会对候选接口重开句柄并 GET_FEATURE，既费 CPU，也可能不停
+    // 把蓝牙鼠标从省电状态叫醒。电池百分比本来就变化很慢，跟随 15 秒一次的扫描足够。
     for (const auto& candidate : m_candidates)
     {
-        int percent = -1;
-        if (!ReadHidBatteryStrength(candidate.path, percent))
+        if (candidate.battery < 0)
             continue;
 
         result.valid = true;
         result.link = LinkFromTransport(candidate.transport, candidate.vid, candidate.pid,
             candidate.product);
-        result.battery = percent;
+        result.battery = candidate.battery;
         result.name = candidate.product;
         if (result.name.empty())
         {
@@ -1200,9 +1234,15 @@ SourceResult CMouseMonitor::PollHidBattery()
     if (!m_mouse_ifaces.empty())
     {
         // 雷柏接收器是常驻设备：鼠标关机后接收器（连同它的 HID 接口）不会从系统里消失，
-        // 所以「接口还在」并不能推出「鼠标还连着」。这台设备的连接状态已经由雷柏私有
-        // 协议负责（而且它的活性探测确实可用）时，就不许通用 HID 再顶上来报「已连接」。
-        const bool rapoo_says_offline = m_rapoo_authoritative && ProbeTrusted() && !m_rapoo_alive;
+        // 所以「接口还在」并不能推出「鼠标还连着」。只要雷柏私有协议确实在负责这台设备、
+        // 且已经判定离线，就不许通用 HID 再顶上来报「已连接」。
+        //
+        // 这里不再要求 ProbeTrusted()：早先加上这个条件后，特性通道不支持读命令的机型
+        // 即使雷柏侧靠 4 分钟沉默判定出了离线，也会被 HID 的「接口还在」永久盖住，
+        // 等于离线回退根本没生效。改为「探测可用过 或 本次绑定收到过上报」，
+        // 至少保证这条回退在真实设备上能走到。
+        const bool rapoo_says_offline = m_rapoo_authoritative && !m_rapoo_alive
+            && (ProbeTrusted() || m_saw_report);
 
         const MouseIface* first = nullptr;
         for (const auto& iface : m_mouse_ifaces)

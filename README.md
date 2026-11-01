@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.0.16](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.16)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.0.17](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.17)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.16**，
-下载：[MouseStatus V1.0.16](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.16)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.0.17**，
+下载：[MouseStatus V1.0.17](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.0.17)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -307,7 +307,8 @@ rem 产物：bin\x64\Release\MouseStatus.dll
   所以关机后约 **4 秒**变 `--`。间隔不能再缩：实测 1.3 秒间隔时会在鼠标明明开着的情况下失败，
   1.8~2 秒间隔则 30/30 成功。
   雷柏鼠标静置时最长 3 分钟才发一帧报文，只看「这一轮有没有数据」必然误判。
-  探测通道不支持该命令的机型会退化成 60 秒沉默判定，效果是「关机后慢一点才变 `--`」，不会误报离线。
+  探测通道不支持该命令的机型会退化成 **4 分钟**沉默判定（实测静置最长 3 分钟才发一帧，阈值必须比它长），
+  效果是「关机后慢一点才变 `--`」，不会误报离线。
 - **蓝牙鼠标的「是否已连接」取自蓝牙栈的 `BLUETOOTH_DEVICE_INFO::fConnected`**，不是「PnP 节点是否存在」。
   这一点很关键：`BTHLE\DEV_xxx` 节点在设备关机后**不会从系统里消失**（Windows 会保留已配对设备的
   devnode 与电量缓存，就是「设置」里显示「已配对」的那种状态），单看节点会把关机误判成在线。
@@ -336,6 +337,7 @@ le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
 
 | 版本 | 变更 |
 |---|---|
+| **V1.0.17** | 性能与稳定性优化：通用 HID 电量改为复用扫描时读到的值（不再每轮 `GET_FEATURE`，不再持续唤醒蓝牙鼠标）；HID 候选 / 蓝牙节点重扫间隔放宽到 15 秒 / 10 秒；日志关闭时启动不再做全量诊断；诊断日志不再每写一行都重复检查文件；「立即写入诊断」改由采集线程执行，消除 UI 线程与采集线程的并发访问；雷柏探测不可用时的离线回退恢复生效（阈值 4 分钟）；充电时电池图标增加带描边的闪电标记 |
 | **V1.0.16** | 关机响应提速：探测窗口 1.6→2 秒、间隔 3→1.8 秒、离线阈值 9.5→3 秒，关机后约 **4 秒**变 `--`（V1.0.15 要 10 秒）。间隔下限由实测确定：1.3 秒间隔会在鼠标开着时连续失败，1.8~2 秒间隔 30/30 成功 |
 | V1.0.15 | 雷柏关机识别真正跑通：实测读命令下发后约 **270ms**（偶发 800ms）才把应答写进特性报文，V1.0.14 只睡 30/60ms 就读，探测 100% 失败。改为 1.6 秒窗口内每 20ms 轮询，首字节 `0x01` 才算应答；真机对照开机的 203 次探测全部成功、关机的 45 次全部不应答。离线阈值改为 9.5 秒（关机后约 10 秒翻成 `--`），不再撤销挂起的读请求（挂起读不影响取应答，撤销反而吞上报）；探测不可用的机型退回 60 秒沉默判定 |
 | V1.0.14 | 修复雷柏 2.4G 鼠标「连没连」判断不准：活性探测带着 status 端点挂起的读请求去 ping，特性通道永远拿不到应答，一次失败就被当成断开并关句柄重枚举（界面在有读数与未知之间跳，关机也无法识别）。改为探测前先 `CancelPendingStatusRead`、探测本身加重试与失败明细；离线判定改看「最近一次有应答的时刻」+ 宽限期（探测可用 8s / 不可用 30s），句柄只在真正失效时重建；接收器常驻不再等于鼠标在线 |
