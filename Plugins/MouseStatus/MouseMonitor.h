@@ -125,7 +125,6 @@ private:
     // 「鼠标是否存在」与电量分开记：只要枚举到外接鼠标集合就算在线，
     // 哪怕它一个标准电池用途都没暴露（很多蓝牙鼠标就是这样）。
     std::vector<MouseIface> m_mouse_ifaces;
-    bool m_hid_scan_logged{ false };
 
     // 蓝牙
     std::vector<BtBatteryEntry> m_bt_entries;
