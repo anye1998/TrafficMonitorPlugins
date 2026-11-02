@@ -12,7 +12,7 @@ namespace {
 
 // 客户区设计尺寸（96 DPI），实际尺寸按所在显示器的 DPI 缩放
 constexpr int kClientWidth = 440;
-constexpr int kClientHeight = 394;
+constexpr int kClientHeight = 416;
 
 const wchar_t* const kWindowClass = L"MouseStatusOptionsWindow";
 
@@ -33,6 +33,7 @@ enum : int
     IDC_CHK_PROBE,
     IDC_COMBO_LINK,
     IDC_STATIC_LINK_NOW,
+    IDC_STATIC_DEVICE,
     IDC_EDIT_PATH,
     IDC_STATIC_SIZE,
     IDC_EDIT_INI,
@@ -53,6 +54,7 @@ struct OptionsUi
     HWND chk_probe{ nullptr };
     HWND combo_link{ nullptr };
     HWND static_link_now{ nullptr };
+    HWND static_device{ nullptr };   // 单独一行显示识别到的设备名
     HWND edit_path{ nullptr };
     HWND static_size{ nullptr };
     HWND edit_ini{ nullptr };
@@ -190,6 +192,24 @@ void RefreshLinkNow(OptionsUi* ui)
     std::wstring text = L"当前识别：";
     text += snap.live ? LinkTextLocal(snap.link) : L"未连接";
     ::SetWindowTextW(ui->static_link_now, text.c_str());
+
+    if (ui->static_device != nullptr)
+    {
+        std::wstring device = L"设备：";
+        if (!snap.live)
+        {
+            device += L"（未检测到在线鼠标）";
+        }
+        else
+        {
+            std::wstring name = snap.device_name;
+            // 设备自报的名字常带尾随空格（"USB GAMING MOUSE "），去掉再显示
+            while (!name.empty() && (name.back() == L' ' || name.back() == L'\t'))
+                name.pop_back();
+            device += name.empty() ? L"（未上报名称）" : name;
+        }
+        ::SetWindowTextW(ui->static_device, device.c_str());
+    }
 }
 
 HWND MakeChild(OptionsUi* ui, const wchar_t* cls, const wchar_t* text, DWORD style, DWORD ex_style,
@@ -247,48 +267,52 @@ void CreateChildren(OptionsUi* ui)
         0, 242, 126, 182, 18, IDC_STATIC_LINK_NOW);
     RefreshLinkNow(ui);
 
+    // 设备名单独占一行：这一格有整个内宽（408px），长名字也放得下
+    ui->static_device = MakeChild(ui, L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS,
+        0, 16, 150, inner, 18, IDC_STATIC_DEVICE);
+
     MakeChild(ui, L"STATIC",
         L"自动：按厂商 PID、产品名关键词、是否上报电量依次判断。\r\n"
         L"都判不出来时显示「USB 接口」（有线/无线不猜），此时可在这里指定。",
-        SS_LEFT, 0, 16, 152, inner, 32, -1);
+        SS_LEFT, 0, 16, 174, inner, 32, -1);
 
     // 日志文件
-    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 192, inner, 16, -1);
+    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 214, inner, 16, -1);
     ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 210, inner, 24, IDC_EDIT_PATH);
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 232, inner, 24, IDC_EDIT_PATH);
 
-    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 240, inner, 16, IDC_STATIC_SIZE);
+    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 262, inner, 16, IDC_STATIC_SIZE);
     RefreshSizeLabel(ui);
 
     // 采集周期 —— 这是本插件唯一一个会明显影响行为的时间类设置项
-    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 266, 120, 18,
+    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 288, 120, 18,
         IDC_STATIC_PERIOD);
     ui->edit_period = MakeChild(ui, L"EDIT", L"",
-        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 263, 72, 24, IDC_EDIT_PERIOD);
+        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 285, 72, 24, IDC_EDIT_PERIOD);
     FillPeriodEdit(ui);
-    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 262, 56, 26,
+    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 284, 56, 26,
         IDC_BTN_APPLY);
     {
         wchar_t hint[64] = { 0 };
         ::swprintf_s(hint, L"%d ~ %d", kMinLoopPeriodMs, kMaxLoopPeriodMs);
-        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 266, 140, 18, IDC_STATIC_PERIOD_HINT);
+        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 288, 140, 18, IDC_STATIC_PERIOD_HINT);
     }
 
     // 配置文件（ini）—— 和 Battery / DateTime 等插件放在同一个目录
     MakeChild(ui, L"STATIC",
         L"插件配置文件（ini，日志 / 探活 / 连接方式 / 采集周期保存在这里）：",
-        SS_LEFT, 0, 16, 296, inner, 16, -1);
+        SS_LEFT, 0, 16, 318, inner, 16, -1);
     ui->edit_ini = MakeChild(ui, L"EDIT", diag::ConfigFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 314, inner, 24, IDC_EDIT_INI);
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 336, inner, 24, IDC_EDIT_INI);
 
     // 按钮行
-    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 350, 96, 28,
+    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 372, 96, 28,
         IDC_BTN_OPEN);
-    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 350, 96, 28,
+    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 372, 96, 28,
         IDC_BTN_CLEAR);
-    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 350, 110, 28,
+    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 372, 110, 28,
         IDC_BTN_DUMP);
-    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 350, 72, 28,
+    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 372, 72, 28,
         IDC_BTN_CLOSE);
 }
 
@@ -506,7 +530,7 @@ bool ShowMouseStatusOptions(void* parent)
     if (ui.scale < 100)
         ui.scale = 100;
 
-    // 布局按「客户区 440x394」设计，这里换算成含标题栏的整窗尺寸
+    // 布局按「客户区 440x416」设计，这里换算成含标题栏的整窗尺寸
     const DWORD win_style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
     const DWORD win_ex_style = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
     RECT frame = { 0, 0, MulDiv(kClientWidth, ui.scale, 100), MulDiv(kClientHeight, ui.scale, 100) };
