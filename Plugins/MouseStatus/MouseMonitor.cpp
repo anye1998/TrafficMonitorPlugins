@@ -369,7 +369,10 @@ void CMouseMonitor::Run()
 #else
     const wchar_t* arch = L"Win32";
 #endif
-    diag::Log(L"=== MouseStatus %s 启动，日志：%s ===", arch, diag::LogFilePath().c_str());
+    // 日志关闭时连这一行也不写：Log 的前置判断在函数内部，但实参 diag::LogFilePath()
+    // 会先被求值、顺手把 %LOCALAPPDATA%\MouseStatus 目录建出来 —— 那等于「开关关了还留个空目录」。
+    if (diag::Enabled())
+        diag::Log(L"=== MouseStatus %s 启动，日志：%s ===", arch, diag::LogFilePath().c_str());
 
     // 全量诊断要枚举所有 HID 接口、雷柏端点与全部 PnP 节点，只在日志开启时做；
     // 日志关闭时这些结果都会被 Log 丢掉，枚举的代价却照付，启动会白白变慢。
