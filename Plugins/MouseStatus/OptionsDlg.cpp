@@ -12,7 +12,7 @@ namespace {
 
 // 客户区设计尺寸（96 DPI），实际尺寸按所在显示器的 DPI 缩放
 constexpr int kClientWidth = 440;
-constexpr int kClientHeight = 290;
+constexpr int kClientHeight = 330;
 
 const wchar_t* const kWindowClass = L"MouseStatusOptionsWindow";
 
@@ -26,6 +26,7 @@ bool g_opened = false;
 enum : int
 {
     IDC_CHK_LOG = 1001,
+    IDC_CHK_PROBE,
     IDC_EDIT_PATH,
     IDC_STATIC_SIZE,
     IDC_EDIT_INI,
@@ -43,11 +44,13 @@ struct OptionsUi
 {
     HWND hwnd{ nullptr };
     HWND chk_log{ nullptr };
+    HWND chk_probe{ nullptr };
     HWND edit_path{ nullptr };
     HWND static_size{ nullptr };
     HWND edit_ini{ nullptr };
     HWND edit_period{ nullptr };
-    bool initial{ true };
+    bool initial{ true };          // 打开窗口时的日志开关状态
+    bool initial_probe{ false };   // 打开窗口时的探活开关状态
     bool changed{ false };
     bool done{ false };
     int scale{ 100 };   // DPI 缩放百分比
@@ -157,7 +160,7 @@ void CreateChildren(OptionsUi* ui)
     const int inner = kClientWidth - 32;   // 左右各留 16
 
     // 顶部说明
-    MakeChild(ui, L"STATIC", L"诊断日志用于排查「读不到电量」这类问题，默认开启。",
+    MakeChild(ui, L"STATIC", L"下面两个开关都默认关闭，需要排障或更快的关机识别时再打开。",
         SS_LEFT, 0, 16, 14, inner, 18, -1);
 
     ui->chk_log = MakeChild(ui, L"BUTTON", L"启用诊断日志",
@@ -166,42 +169,53 @@ void CreateChildren(OptionsUi* ui)
         ::SendMessageW(ui->chk_log, BM_SETCHECK,
             diag::Enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
 
-    // 日志文件
-    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 68, inner, 16, -1);
-    ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 86, inner, 24, IDC_EDIT_PATH);
+    // 探活开关 —— 这是本版新增的、唯一会「打扰硬件」的选项，说明必须写在旁边
+    ui->chk_probe = MakeChild(ui, L"BUTTON", L"主动探测鼠标是否在线（雷柏 2.4G）",
+        BS_AUTOCHECKBOX | WS_TABSTOP, 0, 16, 62, 340, 22, IDC_CHK_PROBE);
+    if (ui->chk_probe != nullptr)
+        ::SendMessageW(ui->chk_probe, BM_SETCHECK,
+            CMouseMonitor::ProbeEnabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+    MakeChild(ui, L"STATIC",
+        L"关闭：不唤醒鼠标、不占无线通道；关机后约 4 分钟才显示离线。\r\n"
+        L"开启：关机 4~8 秒识别；代价是每 4 秒查询一次（用鼠标时不查）。",
+        SS_LEFT, 0, 16, 86, inner, 34, -1);
 
-    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 118, inner, 16, IDC_STATIC_SIZE);
+    // 日志文件
+    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 128, inner, 16, -1);
+    ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 146, inner, 24, IDC_EDIT_PATH);
+
+    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 176, inner, 16, IDC_STATIC_SIZE);
     RefreshSizeLabel(ui);
 
     // 采集周期 —— 这是本插件唯一一个会明显影响行为的设置项
-    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 151, 120, 18,
+    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 202, 120, 18,
         IDC_STATIC_PERIOD);
     ui->edit_period = MakeChild(ui, L"EDIT", L"",
-        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 148, 72, 24, IDC_EDIT_PERIOD);
+        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 199, 72, 24, IDC_EDIT_PERIOD);
     FillPeriodEdit(ui);
-    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 147, 56, 26,
+    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 198, 56, 26,
         IDC_BTN_APPLY);
     {
         wchar_t hint[64] = { 0 };
         ::swprintf_s(hint, L"%d ~ %d", kMinLoopPeriodMs, kMaxLoopPeriodMs);
-        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 151, 140, 18, IDC_STATIC_PERIOD_HINT);
+        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 202, 140, 18, IDC_STATIC_PERIOD_HINT);
     }
 
     // 配置文件（ini）—— 和 Battery / DateTime 等插件放在同一个目录
-    MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关与采集周期保存在这里）：", SS_LEFT, 0,
-        16, 186, inner, 16, -1);
+    MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关 / 探活开关 / 采集周期保存在这里）：",
+        SS_LEFT, 0, 16, 232, inner, 16, -1);
     ui->edit_ini = MakeChild(ui, L"EDIT", diag::ConfigFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 204, inner, 24, IDC_EDIT_INI);
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 250, inner, 24, IDC_EDIT_INI);
 
     // 按钮行
-    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 246, 96, 28,
+    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 286, 96, 28,
         IDC_BTN_OPEN);
-    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 246, 96, 28,
+    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 286, 96, 28,
         IDC_BTN_CLEAR);
-    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 246, 110, 28,
+    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 286, 110, 28,
         IDC_BTN_DUMP);
-    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 246, 72, 28,
+    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 286, 72, 28,
         IDC_BTN_CLOSE);
 }
 
@@ -231,8 +245,18 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         {
             const bool checked = (::SendMessageW(ui->chk_log, BM_GETCHECK, 0, 0) == BST_CHECKED);
             diag::SetEnabled(checked);
-            ui->changed = (checked != ui->initial);
+            if (checked != ui->initial)
+                ui->changed = true;
             RefreshSizeLabel(ui);
+            return 0;
+        }
+        if (id == IDC_CHK_PROBE && code == BN_CLICKED)
+        {
+            const bool checked = (::SendMessageW(ui->chk_probe, BM_GETCHECK, 0, 0) == BST_CHECKED);
+            // 立即生效：写 ini + 置内存标志 + 唤醒采集线程，不必重启主程序
+            CMouseMonitor::SetProbeEnabled(checked);
+            if (checked != ui->initial_probe)
+                ui->changed = true;
             return 0;
         }
         if (id == IDC_BTN_APPLY && code == BN_CLICKED)
@@ -274,7 +298,8 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
                 diag::SetEnabled(true);
                 if (ui->chk_log != nullptr)
                     ::SendMessageW(ui->chk_log, BM_SETCHECK, BST_CHECKED, 0);
-                ui->changed = (true != ui->initial);
+                if (!ui->initial)
+                    ui->changed = true;
             }
             // 交给工作线程执行，避免和采集线程并发枚举 / 并发改报文记录状态
             CMouseMonitor::Instance().RequestDiagnosticsDump();
@@ -376,6 +401,7 @@ bool ShowMouseStatusOptions(void* parent)
 
     OptionsUi ui;
     ui.initial = diag::Enabled();
+    ui.initial_probe = CMouseMonitor::ProbeEnabled();
     ui.changed = false;
 
     const int dpi = QueryDpi(parent_wnd);

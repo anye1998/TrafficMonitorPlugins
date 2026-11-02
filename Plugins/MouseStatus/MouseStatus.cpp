@@ -265,7 +265,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.18";
+        return L"1.0.19";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:
@@ -314,10 +314,11 @@ void* CMouseStatus::GetPluginIcon()
 
 namespace {
 
-constexpr int kCmdToggleLog = 0;
-constexpr int kCmdClearLog = 1;
-constexpr int kCmdOpenFolder = 2;
-constexpr int kCmdDumpNow = 3;
+constexpr int kCmdToggleProbe = 0;
+constexpr int kCmdToggleLog = 1;
+constexpr int kCmdClearLog = 2;
+constexpr int kCmdOpenFolder = 3;
+constexpr int kCmdDumpNow = 4;
 
 // TrafficMonitor 的插件命令 ID 段（主程序 resource.h 里的
 // ID_PLUGIN_COMMAND_START / ID_PLUGIN_COMMAND_MAX）。主窗口菜单在查勾选状态时
@@ -329,13 +330,14 @@ constexpr int kCommandIdMax = 33664;
 
 int CMouseStatus::GetCommandCount()
 {
-    return 4;
+    return 5;
 }
 
 const wchar_t* CMouseStatus::GetCommandName(int command_index)
 {
     switch (command_index)
     {
+    case kCmdToggleProbe: return L"主动探测鼠标在线状态";
     case kCmdToggleLog: return L"启用诊断日志";
     case kCmdClearLog: return L"清空诊断日志";
     case kCmdOpenFolder: return L"打开日志文件夹";
@@ -350,6 +352,8 @@ int CMouseStatus::IsCommandChecked(int command_index)
     if (command_index >= kCommandIdStart && command_index <= kCommandIdMax)
         command_index -= kCommandIdStart;
 
+    if (command_index == kCmdToggleProbe)
+        return CMouseMonitor::ProbeEnabled() ? 1 : 0;
     if (command_index == kCmdToggleLog)
         return diag::Enabled() ? 1 : 0;
     return 0;
@@ -362,6 +366,9 @@ void CMouseStatus::OnPluginCommand(int command_index, void* hWnd, void* para)
 
     switch (command_index)
     {
+    case kCmdToggleProbe:
+        CMouseMonitor::SetProbeEnabled(!CMouseMonitor::ProbeEnabled());
+        break;
     case kCmdToggleLog:
         diag::SetEnabled(!diag::Enabled());
         break;

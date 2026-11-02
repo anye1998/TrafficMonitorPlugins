@@ -34,7 +34,9 @@ struct DiagState
     std::wstring dir;
     std::wstring ini_path;
     bool path_ready = false;
-    bool enabled = true;
+    // 默认关闭：日志只用于排障，平时不该往磁盘上写任何东西。
+    // 需要排查时用右键菜单「启用诊断日志」，或设置界面里的勾选框打开。
+    bool enabled = false;
     bool hard_disabled = false;    // 环境变量强制关闭
     bool settings_loaded = false;
     // 日志文件是否已经确认存在。确认一次后就不再每写一行都去查文件属性/大小，
@@ -161,17 +163,17 @@ void LoadSettings(DiagState& st)
         return;
     st.settings_loaded = true;
 
-    bool value = true;
+    bool value = false;   // 缺省关闭
     bool has_value = ReadIniEnabled(st, value);
 
     MigrateLegacyRegistry(st, value, has_value);
 
     if (!has_value)
     {
-        // 两个来源都没有：用默认值，并立刻把 ini 落盘，
-        // 这样插件目录里能直接看到配置文件，和别的插件的习惯一致。
-        value = true;
-        WriteIniEnabled(st, true);
+        // 两个来源都没有：用默认值（关闭），并立刻把 ini 落盘，
+        // 这样插件目录里能直接看到配置文件里各开关的键名，和别的插件的习惯一致。
+        value = false;
+        WriteIniEnabled(st, false);
     }
 
     st.enabled = st.hard_disabled ? false : value;

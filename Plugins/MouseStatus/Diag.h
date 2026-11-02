@@ -7,6 +7,7 @@
 // 日志位置：%LOCALAPPDATA%\MouseStatus\MouseStatus.log（UTF-8 带 BOM，可直接用记事本打开）
 // 开关：插件右键菜单 / 设置对话框里的「启用诊断日志」，持久化在
 //       <TrafficMonitor 配置目录>\plugins\MouseStatus.ini 的 [config] enable_log，
+//       **默认关闭**（不写日志就不产生任何磁盘写入）
 //       与 Battery / DateTime / KeyboardIndicator 等插件的 ini 配置方式保持一致。
 // 另外环境变量 MOUSESTATUS_NOLOG=1 可以作为强制关闭的兜底。
 #pragma once

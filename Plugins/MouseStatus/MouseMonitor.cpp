@@ -21,6 +21,9 @@ namespace {
 constexpr DWORD kReportBudgetMs = 300;           // 每轮最多等待被动上报的时长
 constexpr ULONGLONG kProbeIntervalMs = 4000;     // 无上报时活性探测的间隔
 constexpr ULONGLONG kProbeIntervalOfflineMs = 5000;  // 已经判定离线后放宽，避免对着不存在的设备猛问
+constexpr ULONGLONG kProbeIntervalAwayMs = 25000;    // 人离开（60 秒无输入）后再放宽：没人看状态栏，慢慢问
+constexpr ULONGLONG kUserIdleForAwayMs = 60000;  // 多久没有任何键鼠输入算「人离开了」
+constexpr ULONGLONG kProbeMinGapAfterEvidenceMs = 3000;  // 刚收到过上报就别再探，纯属多余
 constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔（仅在句柄确实失效后）
 // 重新枚举的间隔不宜太短：每扫一次 HID 就要打开系统里所有 HID 接口，
 // 每扫一次蓝牙就要枚举全部 PnP 节点。设备插拔本来就会改变这两份清单，
@@ -53,15 +56,16 @@ constexpr BYTE kProbeNack = 0x02;                // 设备未应答（关机 / �
 
 // 雷柏鼠标「多久没有任何证据算断开」
 //
-// 探测可用时：6 秒。判定是按「探测间隔」走的，所以关机后实际在 4~8 秒之间翻成离线
-//   （v1.0.17 做到 4 秒，代价是 1.8 秒一次、每次上百个控制传输的高频探测 —— 那正是
-//   鼠标卡顿的来源。用流畅度换两三秒的判定延迟，这个取舍是值得的）。
-// 探测不可用时（个别机型不支持特性通道）：退回纯「无上报」判定，见下面的
-//   kRapooOfflineNoProbeMs。这类机型本来就没法准确判断，宁可慢也不误报。
-constexpr ULONGLONG kRapooOfflineWithProbeMs = 6000;
-// 探测不可用、只能看沉默时长时取 4 分钟：实测雷柏鼠标静置最长 3 分钟才发一帧，
-// 阈值必须比它长，否则「静置」又会被误报成「断开」。代价是这类机型关机后要慢一些才变 --。
+// 探活关闭时（默认）：完全靠沉默时长。实测这类鼠标静置最长 3 分钟才发一帧，
+//   阈值必须比它长，所以取 4 分钟 —— 关机后要等 4 分钟左右才显示离线。
+// 探活开启时：判定 = 「探测间隔 + 窗口 + 1 秒」，所以关机后 4~8 秒（离线时 5~8 秒、
+//   人离开状态下 25~27 秒）就会翻成离线，并且静置不会被误报。
+//   v1.0.17 曾把这个延迟做到 4 秒，代价是 1.8 秒一次、每次上百个控制传输的高频探测 ——
+//   那正是鼠标卡顿的来源。
 constexpr ULONGLONG kRapooOfflineNoProbeMs = 240000;
+// 刚启动、一帧上报都没收到过时用的下限：多半是启动时鼠标就是关的，
+// 不该干等 4 分钟才显示「未连接」。
+constexpr ULONGLONG kRapooOfflineMinMs = 6000;
 constexpr int kProbeFailStreakLimit = 3;         // 连续失败这么多次就写一条日志说明
 constexpr int kUnlockAfterFailStreak = 1;        // 失败过一次后，下次探测补发 A5 A3 唤醒握手
 
@@ -315,6 +319,49 @@ bool CMouseMonitor::SetLoopPeriodMs(int ms)
     return diag::SetConfigInt(L"refresh_interval_ms", ms);
 }
 
+// 探活开关的读取：运行中读工作线程缓存的值，线程还没起来（或被关了）就从 ini 取。
+// 缺省 = 关闭（probe_enabled 不存在时按 0 处理）。
+bool CMouseMonitor::ProbeEnabled()
+{
+    const LONG cached =
+        ::InterlockedCompareExchange((volatile LONG*)&Instance().m_probe_enabled, -1, -1);
+    if (cached >= 0)
+        return cached != 0;
+
+    return diag::GetConfigInt(L"probe_enabled", 0, 0, 1) != 0;
+}
+
+bool CMouseMonitor::SetProbeEnabled(bool on)
+{
+    CMouseMonitor& self = Instance();
+    ::InterlockedExchange((volatile LONG*)&self.m_probe_enabled, on ? 1 : 0);
+
+    // 唤醒一下：关掉时能让正在等应答的探测尽快收手；打开时让下一轮立刻按新设置走
+    if (self.m_wake != nullptr)
+        ::SetEvent(self.m_wake);
+
+    diag::Log(L"主动探测已%s", on ? L"开启" : L"关闭");
+    return diag::SetConfigInt(L"probe_enabled", on ? 1 : 0);
+}
+
+// 用户是否已经离开：一段时间内没有任何键盘/鼠标输入。
+// 用来把探测间隔放宽 —— 人不在电脑前，状态栏没人看，没必要每 4 秒去戳一下鼠标。
+namespace {
+
+bool UserAway()
+{
+    LASTINPUTINFO info;
+    ::ZeroMemory(&info, sizeof(info));
+    info.cbSize = sizeof(info);
+    if (!::GetLastInputInfo(&info))
+        return false;
+    // GetLastInputInfo 填的是 GetTickCount 的 32 位值，用无符号减法天然处理回绕
+    const DWORD idle = ::GetTickCount() - info.dwTime;
+    return (ULONGLONG)idle >= kUserIdleForAwayMs;
+}
+
+} // namespace
+
 void CMouseMonitor::Run()
 {
 #ifdef _WIN64
@@ -333,6 +380,12 @@ void CMouseMonitor::Run()
     ::InterlockedExchange((volatile LONG*)&m_period_ms, (LONG)period_ms);
     diag::Log(L"采集周期：%d ms（ini 键 refresh_interval_ms，默认 %d）", period_ms,
         kDefaultLoopPeriodMs);
+
+    // 探活开关在这里解析一次并缓存，之后每轮直接读缓存（设置界面改了会即时生效）
+    const bool probe_on = ProbeEnabled();
+    ::InterlockedExchange((volatile LONG*)&m_probe_enabled, probe_on ? 1 : 0);
+    diag::Log(L"主动探测：%s（ini 键 probe_enabled，默认关闭）",
+        probe_on ? L"开启" : L"关闭（关机靠沉默时长判定，约 4 分钟）");
 
     while (::WaitForSingleObject(m_stop, 0) == WAIT_TIMEOUT)
     {
@@ -980,6 +1033,9 @@ SourceResult CMouseMonitor::PollRapoo()
     SourceResult result;
     result.source = DataSource::Rapoo;
 
+    // 探活开关（缓存值，开销就是一次原子读）。关掉时本函数只剩「收被动上报」这一件事。
+    const bool probe_on = ProbeEnabled();
+
     if (!EnsureRapoo())
         return result;
 
@@ -1000,31 +1056,39 @@ SourceResult CMouseMonitor::PollRapoo()
 
         // 刚打开句柄、status 端点上还没有挂起的读请求，此时探一次活最干净：
         // 结果直接说明「这台机器的特性通道能不能当活性判据用」。
-        const bool baseline = ProbeRapooAlive();
-        diag::Log(L"雷柏端点首次探测：%s", baseline ? L"有应答" : L"无应答");
-        if (baseline)
+        // 探活关掉时这一步必须跳过，否则等于偷偷探了一次。
+        if (probe_on)
         {
-            m_probe_ok_tick = m_rapoo_last_evidence;
-            m_probe_fail_streak = 0;
+            const bool baseline = ProbeRapooAlive();
+            m_probe_tick = ::GetTickCount64();   // 记下来，免得下一轮立刻又探一次
+            diag::Log(L"雷柏端点首次探测：%s", baseline ? L"有应答" : L"无应答");
+            if (baseline)
+            {
+                m_probe_ok_tick = m_rapoo_last_evidence;
+                m_probe_fail_streak = 0;
+            }
         }
     }
 
     const bool got_report = ReadRapooReports(kReportBudgetMs);
 
-    // 没有被动上报时再主动探一次活。
-    // 探测会把鼠标从省电状态叫醒（这正是它能当判据的原因），按 4 秒一次控制频率。
-    // 不再在探测前撤销挂起的读请求：实测挂起读不影响特性通道取应答，
-    // 反而撤销会吞掉正赶来的上报。
+    // 没有被动上报时再主动探一次活（探活关掉时整段跳过）。
+    // 探测会把鼠标从省电状态叫醒（这正是它能当判据的原因），所以能省则省：
+    //   ① 探活关闭：一次都不探，判定完全交给沉默时长；
+    //   ② 刚收到过上报（3 秒内）：设备明明刚说过话，再问纯属多余；
+    //   ③ 用户正在动鼠标：那时鼠标显然在线，探测只会抢走输入报文的带宽；
+    //   ④ 人离开（60 秒无任何键鼠输入）：状态栏没人看，间隔放宽到 25 秒。
     bool probe_ok = false;
     bool probed = false;
     const ULONGLONG probe_now = ::GetTickCount64();
-    // 在线时按 4 秒探；已经判定离线后 5 秒，免得对着一台根本没应答的设备反复发命令。
-    // 鼠标重新打开时它会自己开始上报，不依赖探测也能立刻恢复。
-    const ULONGLONG probe_gap = m_rapoo_alive ? kProbeIntervalMs : kProbeIntervalOfflineMs;
+    const bool away = probe_on && UserAway();
+    const ULONGLONG probe_gap = away ? kProbeIntervalAwayMs
+                                     : (m_rapoo_alive ? kProbeIntervalMs : kProbeIntervalOfflineMs);
     const bool probe_due = (m_probe_tick == 0) || (probe_now - m_probe_tick >= probe_gap);
-    // 用户正在动鼠标就不探：那时鼠标显然在线，探测反而会抢走输入报文的带宽。
-    const bool cursor_active = CursorActiveRecently(kCursorActiveMs);
-    if (!got_report && !just_opened && probe_due && !cursor_active
+    const bool cursor_active = probe_on && CursorActiveRecently(kCursorActiveMs);
+    const bool recently_seen = probe_now >= m_rapoo_last_evidence
+        && probe_now - m_rapoo_last_evidence < kProbeMinGapAfterEvidenceMs;
+    if (probe_on && !got_report && !just_opened && probe_due && !cursor_active && !recently_seen
         && m_h_control != INVALID_HANDLE_VALUE && m_h_feature != INVALID_HANDLE_VALUE)
     {
         m_probe_tick = probe_now;
@@ -1059,14 +1123,17 @@ SourceResult CMouseMonitor::PollRapoo()
             diag::Log(L"雷柏活性探测连续失败 %d 次（最近一次应答首字节=0x%02X）",
                 m_probe_fail_streak, m_probe_last_code);
 
-        // 探测可用就用 6 秒；探测从未成功过则看情况：
-        //   - 收到过上报：设备确实活着，只是这台机器的特性通道不认这条命令，
-        //     只能靠沉默时长判断，退回 4 分钟（宁可慢，不能把静置误报成断开）。
-        //   - 一帧上报都没收到过：多半是启动时鼠标就是关的，仍按 6 秒判离线，
-        //     否则要干等几分钟才显示「未连接」。
-        const ULONGLONG grace = ProbeTrusted()
-            ? kRapooOfflineWithProbeMs
-            : (m_saw_report ? kRapooOfflineNoProbeMs : kRapooOfflineWithProbeMs);
+        // 判据跟着「此刻是否真的在探」走：
+        //   探活开着且探测确实可用 —— 阈值 = 探测间隔 + 窗口 + 1 秒。
+        //     它随间隔一起变，所以人离开后放宽到 25 秒也不会因为「证据过期」被误判成断开；
+        //   探活关闭 / 探测不可用 —— 只能看沉默时长：收到过上报用 4 分钟，
+        //     一帧都没收到过（多半启动时鼠标就是关的）用 6 秒下限，免得干等几分钟。
+        ULONGLONG grace;
+        if (probe_on && ProbeTrusted())
+            grace = probe_gap + kRapooProbeWindowMs + 1000;
+        else
+            grace = m_saw_report ? kRapooOfflineNoProbeMs : kRapooOfflineMinMs;
+
         // 注意：用户正在动鼠标时一律不判离线。跳过探测会让「最后一次证据」变旧，
         // 但此时鼠标显然在工作，翻成「未连接」一定是误报。
         if (!cursor_active && now >= m_rapoo_last_evidence
@@ -1074,7 +1141,7 @@ SourceResult CMouseMonitor::PollRapoo()
         {
             if (m_rapoo_alive)
             {
-                diag::Log(L"雷柏鼠标 %.1f 秒无应答（阈值 %.1f 秒），标记为未连接",
+                diag::Log(L"雷柏鼠标 %.1f 秒没有任何证据（阈值 %.1f 秒），标记为未连接",
                     (double)(now - m_rapoo_last_evidence) / 1000.0, (double)grace / 1000.0);
                 m_rapoo_alive = false;
             }
