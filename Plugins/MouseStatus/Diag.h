@@ -43,6 +43,12 @@ int GetConfigInt(const wchar_t* key, int default_value, int min_value, int max_v
 // 写 ini 里 [config] 段的整数项（供设置界面保存用户改动）；成功返回 true
 bool SetConfigInt(const wchar_t* key, int value);
 
+// 若 ini 里还没有这个键，就写入默认值。
+// 目的是把可调项直接摆到用户眼前 —— 新装用户打开 MouseStatus.ini 就能看到
+// enable_log / probe_enabled / refresh_interval_ms 三行，不用去翻文档才知道有这些开关。
+// 键已存在时什么也不做（不覆盖用户的选择）。
+void EnsureConfigInt(const wchar_t* key, int value);
+
 // 删除 MouseStatus.log 与 MouseStatus.log.old，返回是否全部删干净
 bool DeleteLogFiles();
 

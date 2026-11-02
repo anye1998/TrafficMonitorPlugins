@@ -387,6 +387,10 @@ void CMouseMonitor::Run()
     diag::Log(L"主动探测：%s（ini 键 probe_enabled，默认关闭）",
         probe_on ? L"开启" : L"关闭（关机靠沉默时长判定，约 4 分钟）");
 
+    // 把可调项摆到 ini 里（键已存在就不动），这样用户打开配置文件就知道能调什么
+    diag::EnsureConfigInt(L"refresh_interval_ms", period_ms);
+    diag::EnsureConfigInt(L"probe_enabled", probe_on ? 1 : 0);
+
     while (::WaitForSingleObject(m_stop, 0) == WAIT_TIMEOUT)
     {
         // UI 线程的「立即写入诊断」只置标志，真正的枚举放在工作线程里做，

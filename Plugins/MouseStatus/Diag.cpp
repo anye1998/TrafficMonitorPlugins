@@ -350,6 +350,24 @@ bool SetConfigInt(const wchar_t* key, int value)
     return ::WritePrivateProfileStringW(kIniSection, key, buf, ini.c_str()) != FALSE;
 }
 
+void EnsureConfigInt(const wchar_t* key, int value)
+{
+    if (key == nullptr)
+        return;
+
+    const std::wstring ini = ConfigFilePath();
+    if (ini.empty())
+        return;
+
+    wchar_t buf[32] = { 0 };
+    const DWORD got = ::GetPrivateProfileStringW(kIniSection, key, L"", buf,
+        (DWORD)(sizeof(buf) / sizeof(buf[0])), ini.c_str());
+    if (got > 0)
+        return;   // 已经有值：尊重用户填的，不覆盖
+
+    SetConfigInt(key, value);
+}
+
 bool Enabled()
 {
     DiagState& st = State();
