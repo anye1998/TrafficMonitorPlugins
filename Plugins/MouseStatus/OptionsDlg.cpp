@@ -265,11 +265,12 @@ void CreateChildren(OptionsUi* ui)
     // SS_ENDELLIPSIS：以后文案变长（比如新增连接类型）宁可显示省略号，也不要折行被裁掉
     ui->static_link_now = MakeChild(ui, L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS,
         0, 242, 126, 182, 18, IDC_STATIC_LINK_NOW);
-    RefreshLinkNow(ui);
-
     // 设备名单独占一行：这一格有整个内宽（408px），长名字也放得下
+    // 注意必须在 RefreshLinkNow 之前创建 —— 否则首次刷新时句柄还是空的，那行会空着，
+    // 要等 1 秒后的定时器才补上（第一次截图就是这么空的）。
     ui->static_device = MakeChild(ui, L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS,
         0, 16, 150, inner, 18, IDC_STATIC_DEVICE);
+    RefreshLinkNow(ui);
 
     MakeChild(ui, L"STATIC",
         L"自动：按厂商 PID、产品名关键词、是否上报电量依次判断。\r\n"
@@ -314,6 +315,9 @@ void CreateChildren(OptionsUi* ui)
         IDC_BTN_DUMP);
     MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 372, 72, 28,
         IDC_BTN_CLOSE);
+
+    // 控件都建好后再刷一次这两个标签，避免刚打开窗口时出现空白行
+    RefreshLinkNow(ui);
 }
 
 LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
