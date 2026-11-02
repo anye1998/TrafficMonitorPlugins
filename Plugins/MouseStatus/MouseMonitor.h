@@ -7,9 +7,12 @@
 //    两条链路各有各的判据：
 //      · 2.4G 接收器：接收器是常驻设备，鼠标关机后它的 HID 接口依然在，所以不能拿
 //        「接口还在」当在线。改为对鼠标做「活性探测」：往命令通道下发一次读寄存器，
-//        再在 2 秒窗口内按 20ms 轮询特性报文，首字节变成 0x01 才算鼠标应了。
+//        再在 1.2 秒窗口内按 60~160ms 的步长轮询特性报文，首字节变成 0x01 才算鼠标应了。
 //        真机对照：鼠标开着约 270ms 应答（偶发 800ms），关着则恒回 0x02。
 //        只要探测可用，它的负面结论就当准；个别机型探测不可用时退回「沉默时长」判定。
+//        v1.0.18 起：探测只在「用户没在动鼠标」且「没有被动上报」时才做，间隔 4 秒，
+//        单次探测通常 3~6 个请求就结束 —— 老版本会在这里连续打上百个请求，占满接收器的
+//        厂商通道，反而把鼠标输入挤成「一卡一卡」。
 //      · 蓝牙：节点在设备关机后也不消失，改查 BLUETOOTH_DEVICE_INFO::fConnected。
 //    另外，「本轮没收到报文」绝不等于断开：雷柏鼠标静置时最长 3 分钟一帧不发，
 //    离线判定必须基于「沉默时长」而不是「本轮无数据」，否则界面会一直跳。
@@ -104,6 +107,8 @@ private:
     void CloseRapooHandles();
     bool ReadRapooReports(int budget_ms);
     void CancelPendingStatusRead();
+    // 光标近期是否在动（用来在用户真的在用鼠标时跳过探测）
+    bool CursorActiveRecently(DWORD ms);
     bool ApplyRapooReport(DWORD bytes);
     bool ProbeRapooAlive();
     void LogProbeFailure(int attempt, const wchar_t* why);
@@ -152,6 +157,11 @@ private:
     ULONGLONG m_rapoo_last_evidence{ 0 };
     // 上一轮活性探测的时刻（探测会吵醒鼠标，按 kProbeIntervalMs 控制频率）
     ULONGLONG m_probe_tick{ 0 };
+    // 光标位置与「最近一次移动」的时刻。用户在用鼠标时不探测 —— 探测会占用接收器的
+    // 厂商通道，与鼠标输入报文抢同一段 2.4G 无线带宽（详见 MouseMonitor.cpp 里的说明）。
+    POINT m_last_cursor{ 0, 0 };
+    bool m_cursor_valid{ false };
+    ULONGLONG m_cursor_active_tick{ 0 };
     // 雷柏私有协议是否正在负责这台接收器（句柄打开成功即算）。
     // 用来阻止通用 HID 链路在鼠标关机后顶上来报「已连接」：接收器是常驻设备，
     // 它的 HID 接口永远不会因为鼠标关机而消失。

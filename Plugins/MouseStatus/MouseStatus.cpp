@@ -58,6 +58,45 @@ std::wstring ToWString(int value)
     return std::wstring(buf);
 }
 
+// 提示文本的长度预算。
+//
+// 主程序每秒都会把「主窗口 / 任务栏窗口 + 所有已加载插件」的提示拼成一个字符串，
+// 然后交给 MFC 的 CToolTipCtrl::UpdateTipText；而 MFC 在该函数里有
+//     ENSURE_ARG(AtlStrLen(lpszText) <= MAX_TIP_TEXT_LENGTH)   // MAX_TIP_TEXT_LENGTH = 1024
+// 一旦总长超过 1024 就抛 CInvalidArgException，表现为弹出一个标题为 TrafficMonitor、
+// 正文是「遇到不适当的参数」的错误框（上游 issue #2413 / #2411 / #1219）。
+//
+// 插件拿不到「别人已经用掉多少字符」，唯一能做的是保证自己足够短：
+//   - 默认只输出两三行精简信息（约 30~50 字符）；
+//   - 想看详细数据的用户可在 ini 里置 tooltip_detail=1；
+//   - 无论哪种模式，最后都做一次硬截断兜底。
+constexpr size_t kMaxTooltipChars = 200;
+
+bool TooltipDetailEnabled()
+{
+    // 本函数每轮 DataRequired 都会走一次，而读 ini 是要开文件的；缓存一次即可。
+    // 想在运行中切换就改 ini 后重启 TrafficMonitor（这个值很少变）。
+    static const bool enabled = diag::GetConfigInt(L"tooltip_detail", 0, 0, 1) != 0;
+    return enabled;
+}
+
+void AppendLine(std::wstring& text, const wchar_t* line)
+{
+    if (line == nullptr || line[0] == L'\0')
+        return;
+    if (!text.empty())
+        text += L'\n';
+    text += line;
+}
+
+void ClampTooltip(std::wstring& text)
+{
+    if (text.size() <= kMaxTooltipChars)
+        return;
+    text.resize(kMaxTooltipChars - 1);
+    text += L'…';
+}
+
 } // namespace
 
 CMouseStatus CMouseStatus::m_instance;
@@ -120,87 +159,96 @@ void CMouseStatus::DataRequired()
 
 void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
 {
+    const bool detail = TooltipDetailEnabled();
     std::wstring text;
 
     if (!state.live)
     {
+        // 首次启动就落在这里（还没有任何数据）。老版本会顺手把日志文件的完整路径
+        // 拼进提示里，仅这一项就有 60 多个字符，是「插件第一次启动就弹窗」的直接推手。
         text = L"未检测到在线鼠标";
         if (state.battery >= 0)
         {
-            text += L"\n上次读数：";
+            text += L"\n上次读数 ";
             text += ToWString(state.battery);
             text += L"%";
-            // 离线后 last_check 就停在最后一次成功检查的时刻，用它更贴近
-            // 「这个读数是什么时候看到的」；没有 last_check 时退回 last_seen。
-            const std::wstring& stamp = state.last_check.empty() ? state.last_seen : state.last_check;
-            if (!stamp.empty())
+            // 用「数值最后一次变化的时刻」：它是稳定的，不会每秒抖动导致提示反复重排。
+            if (!state.last_seen.empty())
             {
                 text += L"（";
-                text += stamp;
+                text += state.last_seen;
                 text += L"）";
             }
         }
-        text += L"\n若鼠标确实已连接，请查看日志：\n";
-        text += diag::LogFilePath();
+        if (detail)
+        {
+            text += L"\n日志：";
+            text += diag::LogFilePath();
+        }
+        ClampTooltip(text);
         m_tooltip = text;
         return;
     }
 
-    text += state.device_name.empty() ? L"鼠标" : state.device_name;
-    text += L"\n连接方式：";
+    text = state.device_name.empty() ? L"鼠标" : state.device_name;
+    text += L" · ";
     text += LinkName(state.link);
 
-    text += L"\n电量：";
+    // 电量和充电状态合成一行：既能一眼看完，又比老版本省下 20 多个字符
+    text += L"\n电量 ";
     if (state.battery < 0)
     {
-        text += L"设备未上报电量";
+        text += L"未知";
+        if (detail)
+            text += L"（没有数据源能给出电量）";
     }
     else
     {
         text += ToWString(state.battery);
-        text += L"%";
-        if (state.battery_is_stale)
-            text += L"（上次读数）";
-    }
-
-    text += L"\n状态：";
-    if (state.battery < 0)
-        text += L"无法判定（缺少电量数据）";
-    else
+        text += L"%（";
         text += ChargeName(state.charge);
-
-    text += L"\n数据来源：";
-    text += SourceName(state.source);
-    if (state.source == DataSource::BluetoothProp)
-    {
-        // 这条路径读的是 Windows 缓存的设备属性，什么时候刷新由系统决定，
-        // 不是插件能控制的，写清楚免得用户以为读数卡住了。
-        text += L"（系统缓存值）";
+        text += L"）";
+        if (state.battery_is_stale)
+            text += L" 上次读数";
     }
 
-    // 两个时间分开显示：「读数更新于」是数值真正变化的时刻（数据新鲜度），
-    // 「最近检查」是插件最后一次轮询的时刻（只说明插件还在盯着）。
-    // 之前只显示一个每秒跳动的「更新于」，容易被误认为每秒都在重新读电量。
-    if (!state.last_seen.empty())
+    if (detail)
     {
-        text += L"\n读数更新于 ";
-        text += state.last_seen;
-    }
-    if (!state.last_check.empty() && state.last_check != state.last_seen)
-    {
-        text += L"\n最近检查 ";
-        text += state.last_check;
-        text += L"（数值未变）";
+        std::wstring source = L"数据来源：";
+        source += SourceName(state.source);
+        if (state.source == DataSource::BluetoothProp)
+        {
+            // 这条路径读的是 Windows 缓存的设备属性，什么时候刷新由系统决定，
+            // 不是插件能控制的，写清楚免得用户以为读数卡住了。
+            source += L"（系统缓存值）";
+        }
+        AppendLine(text, source.c_str());
+
+        // 两个时间分开显示：「读数更新于」是数值真正变化的时刻（数据新鲜度），
+        // 「最近检查」是插件最后一次轮询的时刻（只说明插件还在盯着）。
+        if (!state.last_seen.empty())
+        {
+            std::wstring seen = L"读数更新于 ";
+            seen += state.last_seen;
+            AppendLine(text, seen.c_str());
+        }
+        if (!state.last_check.empty() && state.last_check != state.last_seen)
+        {
+            std::wstring check = L"最近检查 ";
+            check += state.last_check;
+            check += L"（数值未变）";
+            AppendLine(text, check.c_str());
+        }
+
+        if (state.battery < 0)
+        {
+            std::wstring hint = L"日志：";
+            hint += diag::LogFilePath();
+            AppendLine(text, hint.c_str());
+        }
     }
 
-    if (state.battery < 0)
-    {
-        text += L"\n提示：没有任何数据来源能给出电量。"
-                L"右键本项 →「插件设置」或右键菜单里的「启用诊断日志 / 清空诊断日志」"
-                L"可管理诊断日志，日志里记录了完整的枚举结果：\n";
-        text += diag::LogFilePath();
-    }
-
+    ClampTooltip(text);
     m_tooltip = text;
 }
 
@@ -217,7 +265,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.0.17";
+        return L"1.0.18";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:

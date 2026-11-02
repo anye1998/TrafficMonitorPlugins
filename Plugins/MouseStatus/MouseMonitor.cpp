@@ -18,43 +18,52 @@ extern "C"
 
 namespace {
 
-constexpr DWORD kReportBudgetMs = 600;           // 每轮最多等待被动上报的时长
-constexpr ULONGLONG kProbeIntervalMs = 1800;     // 无上报时活性探测的间隔
-constexpr ULONGLONG kProbeIntervalOfflineMs = 3000;  // 已经判定离线后放宽，避免对着不存在的设备猛问
+constexpr DWORD kReportBudgetMs = 300;           // 每轮最多等待被动上报的时长
+constexpr ULONGLONG kProbeIntervalMs = 4000;     // 无上报时活性探测的间隔
+constexpr ULONGLONG kProbeIntervalOfflineMs = 5000;  // 已经判定离线后放宽，避免对着不存在的设备猛问
 constexpr ULONGLONG kEndpointRescanMs = 3000;    // 雷柏端点重新枚举的间隔（仅在句柄确实失效后）
 // 重新枚举的间隔不宜太短：每扫一次 HID 就要打开系统里所有 HID 接口，
 // 每扫一次蓝牙就要枚举全部 PnP 节点。设备插拔本来就会改变这两份清单，
-// 15 秒 / 10 秒足够及时，又比原来的 8 秒 / 6 秒少一半以上的重复枚举。
-constexpr ULONGLONG kHidRescanMs = 15000;        // 通用 HID 候选重新枚举的间隔
-constexpr ULONGLONG kBluetoothRescanMs = 10000;  // 蓝牙电量属性重新查询的间隔
+// 20 秒 / 15 秒足够及时，又能把重复枚举的开销压到原来的 1/2 ~ 1/3。
+constexpr ULONGLONG kHidRescanMs = 20000;        // 通用 HID 候选重新枚举的间隔
+constexpr ULONGLONG kBluetoothRescanMs = 15000;  // 蓝牙电量属性重新查询的间隔
 
-// 主动探测（读寄存器）等应答的窗口与轮询步长
+// 主动探测（读寄存器）等应答的窗口、轮询步长与「用户正在用鼠标」的静默阈值
 //
 // 这是整个连接判定的关键参数，真机对照实测（雷柏 VT3，2.4G 接收器）：
 //   - 鼠标开着（哪怕已经静置到插件收不到任何上报）：读命令发下去约 270ms 后被填进特性报文，
 //     偶发最慢约 800ms；连续 203 次全部成功。
 //   - 鼠标关着：5 秒窗口内 45 次全部拿不到应答（首字节恒为 0x02）。
-//     v1.0.14 之所以判不出来，就是因为只睡了 30/60ms 便读一次，远早于 270ms。
-// 所以必须「轮询到窗口末尾」。窗口取 2 秒：既覆盖 800ms 的最坏延迟留足余量，
-// 又让「关机 → 判定」这一步只花一次窗口的时间（见下面的阈值）。
-// 另外实测探测间隔不能短于约 1.5 秒：1.3 秒间隔时会在鼠标明明开着的情况下连续失败，
-// 2 秒间隔则 30/30 成功（延迟 267~516ms）。所以探测频率按 1.8 秒控制，不能再密。
-constexpr DWORD kRapooProbeWindowMs = 2000;
-constexpr DWORD kRapooProbePollMs = 20;
+//
+// ⚠ 性能教训（v1.0.18 修的就是这个）：
+//   v1.0.15~1.0.17 用「2 秒窗口内每 20ms 轮询一次特性报文」来等应答，一次探测最多要发
+//   ~100 个控制传输；而探测间隔只有 1.8 秒 —— 窗口比间隔还长，等于**一刻不停地**在
+//   接收器的厂商通道上打转。2.4G 接收器的带宽是与鼠标输入报文共享的，控制传输占满之后
+//   鼠标的移动报文只能排队，表现出来就是「鼠标一卡一卡」。
+//   现在：①窗口缩到 1.2 秒、步长放大到 60~160ms 且拿到应答立刻收工（通常 3~6 次即返回）；
+//        ②探测间隔放宽到 4 秒；
+//        ③用户正在动鼠标（光标在动）时完全不探测 —— 那时鼠标显然在线，没必要问。
+constexpr DWORD kRapooProbeWindowMs = 1200;
+constexpr DWORD kRapooProbeFirstPollMs = 60;     // 首轮等待：应答最快也要约 270ms，先给它一个起步量
+constexpr DWORD kRapooProbePollMs = 60;          // 常规轮询步长
+constexpr DWORD kRapooProbePollMaxMs = 160;      // 步长上限（设备沉默时逐步放慢，少发几个请求）
+constexpr DWORD kCursorActiveMs = 1500;          // 光标在这么久内动过 = 鼠标肯定在线，跳过探测
 constexpr BYTE kProbeAck = 0x01;                 // 应答就绪
 constexpr BYTE kProbeNack = 0x02;                // 设备未应答（关机 / 未唤醒）
 
 // 雷柏鼠标「多久没有任何证据算断开」
 //
-// 探测可用时：3 秒。一次探测最长 2 秒，所以「关机」从最后一次上报算起约 4 秒内翻成离线
-//   （旧版靠「一次探测失败就断开」做到 3 秒，但那会把静置误报成断开）。
+// 探测可用时：6 秒。判定是按「探测间隔」走的，所以关机后实际在 4~8 秒之间翻成离线
+//   （v1.0.17 做到 4 秒，代价是 1.8 秒一次、每次上百个控制传输的高频探测 —— 那正是
+//   鼠标卡顿的来源。用流畅度换两三秒的判定延迟，这个取舍是值得的）。
 // 探测不可用时（个别机型不支持特性通道）：退回纯「无上报」判定，见下面的
 //   kRapooOfflineNoProbeMs。这类机型本来就没法准确判断，宁可慢也不误报。
-constexpr ULONGLONG kRapooOfflineWithProbeMs = 3000;
+constexpr ULONGLONG kRapooOfflineWithProbeMs = 6000;
 // 探测不可用、只能看沉默时长时取 4 分钟：实测雷柏鼠标静置最长 3 分钟才发一帧，
 // 阈值必须比它长，否则「静置」又会被误报成「断开」。代价是这类机型关机后要慢一些才变 --。
 constexpr ULONGLONG kRapooOfflineNoProbeMs = 240000;
 constexpr int kProbeFailStreakLimit = 3;         // 连续失败这么多次就写一条日志说明
+constexpr int kUnlockAfterFailStreak = 1;        // 失败过一次后，下次探测补发 A5 A3 唤醒握手
 
 // 主循环周期。默认与 TrafficMonitor 的采集间隔（general.monitor_time_span，默认 1000）对齐：
 // 主程序要等 DataRequired 被调用才会来取一次数据、状态栏窗口也是 1000ms 重绘一次，
@@ -837,18 +846,54 @@ void CMouseMonitor::CancelPendingStatusRead()
     m_status_read_pending = false;
 }
 
+// 光标是否在最近 ms 内移动过 —— 只在主循环里调用一次/轮。
+//
+// 用途：用户正在用鼠标的时候**完全不探测**。探测要占用接收器的厂商通道，而这条通道与
+// 鼠标输入报文共享同一条 2.4G 链路，占满之后移动报文就会排队（这就是 v1.0.15 之后
+// 「一卡一卡」的成因）。光标在动 = 鼠标正在工作，此时去问「你还在吗」既没必要也伤体验。
+//
+// 代价很小：一次 GetCursorPos 而已，不碰 HID、不需要任何权限、不影响系统。
+// 注意判据只用来「跳过探测」，不用来「判定在线」—— 光标没动不等于鼠标关机
+// （可能只是没去动它），那种情况照常走探测流程。
+bool CMouseMonitor::CursorActiveRecently(DWORD ms)
+{
+    POINT now;
+    if (::GetCursorPos(&now))
+    {
+        if (!m_cursor_valid)
+        {
+            m_last_cursor = now;
+            m_cursor_valid = true;
+        }
+        else if (now.x != m_last_cursor.x || now.y != m_last_cursor.y)
+        {
+            m_last_cursor = now;
+            m_cursor_active_tick = ::GetTickCount64();
+        }
+    }
+
+    if (m_cursor_active_tick == 0)
+        return false;
+    const ULONGLONG tick = ::GetTickCount64();
+    return tick >= m_cursor_active_tick && tick - m_cursor_active_tick < ms;
+}
+
 // 雷柏「活性探测」：往命令通道下发一次「读寄存器」，再从特性通道取应答。
 // 拿得到应答 = 鼠标此刻还在。接收器本身是常驻设备，它的 HID 接口永远不会因为
 // 鼠标关机而消失，所以「接口还在」和「鼠标还在」是两件事，必须靠这条命令区分。
 //
 // 实测要点（VT3 + 2.4G 接收器，真机对照）：
 //   1) 应答不是立刻就有：设备被命令唤醒后约 270ms 才把结果填进特性报文，偶发 800ms。
-//      旧版睡 30/60ms 就读一次，读到的永远是上一次的缓冲（首字节 0x02 = 未应答），
-//      于是「探测恒失败」，关机与静置再也分不开——这是 v1.0.14 判不出关机的根因。
-//      现在改成在窗口内按 20ms 轮询，直到首字节变成 0x01。
 //   2) status 端点上挂着的未完成读请求**不影响**特性通道取应答（实测 12/12 成功），
 //      所以探测前不再 CancelIo：撤销读请求会吞掉正在到来的上报。
-//   3) 鼠标关着时首字节恒为 0x02，5 秒窗口内 45 次全部如此，不会误报。
+//   3) 鼠标关着时首字节恒为 0x02，不会误报。
+//
+// v1.0.18 的性能修正：老版本在这个窗口里每 20ms 读一次（最多 100 次），而且每次探测前
+// 都补发一遍 A5 A3 解锁包；1.8 秒的探测间隔比 2 秒的窗口还短，于是厂商通道几乎被这个
+// 循环占满，鼠标输入报文排队 —— 这就是「一卡一卡」的来源。现在：
+//   - 解锁包只在打开句柄时、以及连续探测失败后才补发（正常情况下设备不会睡死）；
+//   - 轮询步长从 60ms 起步并逐步放大到 160ms，且**拿到应答立刻返回**，
+//     正常情况 3~6 次 GET_FEATURE 就结束，量级降了一个数量级。
 bool CMouseMonitor::ProbeRapooAlive()
 {
     if (m_h_control == INVALID_HANDLE_VALUE || m_h_feature == INVALID_HANDLE_VALUE)
@@ -858,11 +903,15 @@ bool CMouseMonitor::ProbeRapooAlive()
     if (report_len < 9 || report_len > (int)sizeof(m_read_buf))
         report_len = 33;
 
-    // 补一次 A5 A3 解锁：设备睡沉时会丢掉上一条命令，握手能把它叫醒
-    BYTE unlock[33] = { 0 };
-    const DWORD unlock_len = rapoo::BuildUnlockPacket(unlock, sizeof(unlock));
-    if (unlock_len > 0)
-        WriteOverlapped(m_h_control, unlock, unlock_len, 200);
+    // 只在需要时补 A5 A3 解锁：设备睡沉时会丢掉上一条命令，握手能把它叫醒。
+    // 正常静置并不是「睡沉」，每次都发只会白白多占用一次厂商通道。
+    if (m_probe_fail_streak >= kUnlockAfterFailStreak)
+    {
+        BYTE unlock[33] = { 0 };
+        const DWORD unlock_len = rapoo::BuildUnlockPacket(unlock, sizeof(unlock));
+        if (unlock_len > 0)
+            WriteOverlapped(m_h_control, unlock, unlock_len, 200);
+    }
 
     BYTE cmd[33] = { 0 };
     const DWORD len = rapoo::BuildReadCommand(rapoo::BANK_SYSTEM, rapoo::ADDR_POLLING_HZ, 1,
@@ -875,10 +924,16 @@ bool CMouseMonitor::ProbeRapooAlive()
 
     BYTE last_code = 0xFF;
     const ULONGLONG start = ::GetTickCount64();
-    while (::GetTickCount64() - start < kRapooProbeWindowMs)
+    DWORD step = kRapooProbeFirstPollMs;
+
+    while (true)
     {
         if (::WaitForSingleObject(m_stop, 0) == WAIT_OBJECT_0)
             return false;
+
+        const ULONGLONG elapsed = ::GetTickCount64() - start;
+        if (elapsed >= kRapooProbeWindowMs)
+            break;
 
         BYTE reply[128] = { 0 };
         reply[0] = rapoo::ID_FEATURE;
@@ -895,7 +950,14 @@ bool CMouseMonitor::ProbeRapooAlive()
         {
             last_code = 0xFE;   // HidD_GetFeature 本身失败
         }
-        ::Sleep(kRapooProbePollMs);
+
+        // 睡到下一次轮询，但不要越过窗口；步长逐步放大，设备沉默时少发几个请求
+        const ULONGLONG left = (ULONGLONG)kRapooProbeWindowMs - elapsed;
+        if (left <= step)
+            break;
+        ::Sleep(step);
+        if (step < kRapooProbePollMaxMs)
+            step += kRapooProbePollMs;
     }
 
     m_probe_last_code = last_code;
@@ -950,19 +1012,20 @@ SourceResult CMouseMonitor::PollRapoo()
     const bool got_report = ReadRapooReports(kReportBudgetMs);
 
     // 没有被动上报时再主动探一次活。
-    // 探测本身会把鼠标从省电状态叫醒（这正是它能当判据的原因），所以按 3 秒一次控制频率。
+    // 探测会把鼠标从省电状态叫醒（这正是它能当判据的原因），按 4 秒一次控制频率。
     // 不再在探测前撤销挂起的读请求：实测挂起读不影响特性通道取应答，
     // 反而撤销会吞掉正赶来的上报。
     bool probe_ok = false;
     bool probed = false;
     const ULONGLONG probe_now = ::GetTickCount64();
-    // 在线时按 1.8 秒探（关机要在 4 秒内发现）；已经判定离线后放宽到 3 秒，
-    // 免得对着一台根本没应答的设备每两秒问一次。鼠标重新打开时它会自己开始上报，
-    // 不依赖探测也能立刻恢复。
+    // 在线时按 4 秒探；已经判定离线后 5 秒，免得对着一台根本没应答的设备反复发命令。
+    // 鼠标重新打开时它会自己开始上报，不依赖探测也能立刻恢复。
     const ULONGLONG probe_gap = m_rapoo_alive ? kProbeIntervalMs : kProbeIntervalOfflineMs;
     const bool probe_due = (m_probe_tick == 0) || (probe_now - m_probe_tick >= probe_gap);
-    if (!got_report && !just_opened && probe_due && m_h_control != INVALID_HANDLE_VALUE
-        && m_h_feature != INVALID_HANDLE_VALUE)
+    // 用户正在动鼠标就不探：那时鼠标显然在线，探测反而会抢走输入报文的带宽。
+    const bool cursor_active = CursorActiveRecently(kCursorActiveMs);
+    if (!got_report && !just_opened && probe_due && !cursor_active
+        && m_h_control != INVALID_HANDLE_VALUE && m_h_feature != INVALID_HANDLE_VALUE)
     {
         m_probe_tick = probe_now;
         probed = true;
@@ -996,15 +1059,18 @@ SourceResult CMouseMonitor::PollRapoo()
             diag::Log(L"雷柏活性探测连续失败 %d 次（最近一次应答首字节=0x%02X）",
                 m_probe_fail_streak, m_probe_last_code);
 
-        // 探测可用就用 3 秒；探测从未成功过则看情况：
+        // 探测可用就用 6 秒；探测从未成功过则看情况：
         //   - 收到过上报：设备确实活着，只是这台机器的特性通道不认这条命令，
         //     只能靠沉默时长判断，退回 4 分钟（宁可慢，不能把静置误报成断开）。
-        //   - 一帧上报都没收到过：多半是启动时鼠标就是关的，仍按 3 秒判离线，
+        //   - 一帧上报都没收到过：多半是启动时鼠标就是关的，仍按 6 秒判离线，
         //     否则要干等几分钟才显示「未连接」。
         const ULONGLONG grace = ProbeTrusted()
             ? kRapooOfflineWithProbeMs
             : (m_saw_report ? kRapooOfflineNoProbeMs : kRapooOfflineWithProbeMs);
-        if (now >= m_rapoo_last_evidence && now - m_rapoo_last_evidence >= grace)
+        // 注意：用户正在动鼠标时一律不判离线。跳过探测会让「最后一次证据」变旧，
+        // 但此时鼠标显然在工作，翻成「未连接」一定是误报。
+        if (!cursor_active && now >= m_rapoo_last_evidence
+            && now - m_rapoo_last_evidence >= grace)
         {
             if (m_rapoo_alive)
             {
@@ -1158,7 +1224,7 @@ void CMouseMonitor::ScanHidCandidates()
             return rank(a) < rank(b);
         });
 
-    // 每次重扫（默认 15 秒）只在清单变化时写日志，避免长期开着日志把文件刷大。
+    // 每次重扫（默认 20 秒）只在清单变化时写日志，避免长期开着日志把文件刷大。
     // 指纹里带数量前缀：清单为空时也能与"还没扫过"区分开（否则空清单永远不会写一行，
     // 排查时就看不到"确实扫过、但一个候选都没有"这个关键事实）。
     std::wstring sig = std::to_wstring(m_candidates.size());
@@ -1207,7 +1273,7 @@ SourceResult CMouseMonitor::PollHidBattery()
 
     // 电量直接用 m_hid_scan_tick 那一轮扫描时读到的那一份，不再每轮重新读：
     // 之前的写法每秒都会对候选接口重开句柄并 GET_FEATURE，既费 CPU，也可能不停
-    // 把蓝牙鼠标从省电状态叫醒。电池百分比本来就变化很慢，跟随 15 秒一次的扫描足够。
+    // 把蓝牙鼠标从省电状态叫醒。电池百分比本来就变化很慢，跟随每轮扫描足够。
     for (const auto& candidate : m_candidates)
     {
         if (candidate.battery < 0)
