@@ -184,14 +184,11 @@ void RefreshLinkNow(OptionsUi* ui)
     MouseSnapshot snap;
     CMouseMonitor::Instance().GetSnapshot(snap);
 
+    // 只显示连接方式，不拼设备名：这一格只有 180 像素，设备名（"USB GAMING MOUSE"）
+    // 一拼上去就会折成第二行、被 18px 的行高裁掉 —— 用户截图里正是这个现象。
+    // 设备名在鼠标提示（tooltip）里能看到，这里只回答「现在识别成什么」。
     std::wstring text = L"当前识别：";
     text += snap.live ? LinkTextLocal(snap.link) : L"未连接";
-    if (snap.live && !snap.device_name.empty())
-    {
-        text += L"（";
-        text += snap.device_name;
-        text += L"）";
-    }
     ::SetWindowTextW(ui->static_link_now, text.c_str());
 }
 
@@ -237,7 +234,7 @@ void CreateChildren(OptionsUi* ui)
     MakeChild(ui, L"STATIC", L"连接方式：", SS_LEFT, 0, 16, 126, 76, 18, -1);
     ui->combo_link = MakeChild(ui, L"COMBOBOX", L"",
         CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP,
-        WS_EX_CLIENTEDGE, 96, 122, 150, 200, IDC_COMBO_LINK);
+        WS_EX_CLIENTEDGE, 96, 122, 140, 200, IDC_COMBO_LINK);
     if (ui->combo_link != nullptr)
     {
         ::SendMessageW(ui->combo_link, CB_ADDSTRING, 0, (LPARAM)L"自动（默认）");
@@ -245,8 +242,9 @@ void CreateChildren(OptionsUi* ui)
         ::SendMessageW(ui->combo_link, CB_ADDSTRING, 0, (LPARAM)L"2.4G 无线");
         FillLinkCombo(ui);
     }
-    ui->static_link_now = MakeChild(ui, L"STATIC", L"", SS_LEFT,
-        0, 252, 126, 172, 18, IDC_STATIC_LINK_NOW);
+    // SS_ENDELLIPSIS：以后文案变长（比如新增连接类型）宁可显示省略号，也不要折行被裁掉
+    ui->static_link_now = MakeChild(ui, L"STATIC", L"", SS_LEFT | SS_ENDELLIPSIS,
+        0, 242, 126, 182, 18, IDC_STATIC_LINK_NOW);
     RefreshLinkNow(ui);
 
     MakeChild(ui, L"STATIC",

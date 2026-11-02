@@ -12,7 +12,7 @@
 > 相关问题请提到本仓库 Issues，不要打扰原作者。
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
-> - **下载编译好的插件 —— [MouseStatus V1.2.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.2.2)**（新）
+> - **下载编译好的插件 —— [MouseStatus V1.2.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.2.3)**（新）
 > - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
@@ -117,8 +117,8 @@ git checkout HEAD~1 -- Plugins/HardwareMonitor
 
 **性质**：本 Fork 新增的插件，**由 AI 助手（WorkBuddy）完成设计与实现**，未提交到上游。
 
-插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.2.2**，
-下载：[MouseStatus V1.2.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.2.2)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
+插件位置：[`Plugins/MouseStatus`](./Plugins/MouseStatus)，版本 **V1.2.3**，
+下载：[MouseStatus V1.2.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.2.3)（x64 / x86 各一个 zip，解压出 `MouseStatus.dll`）。
 
 ### 它显示什么
 
@@ -395,7 +395,7 @@ le=1 hasBattery=1 battery=100 isMouse=1 name="HUAWEI Mouse CD20"
 
 | 版本 | 变更 |
 |---|---|
-| **V1.2.2** | 修掉有线鼠标被显示成「2.4G 无线」：`LinkFromTransport` 对 USB 设备的兜底从「一律当成 2.4G 接收器」改为按证据分档（厂商 PID → 名称关键词 → 是否报电量 → 未知），新增 `UsbUnknown`（显示「USB 接口」）与右键菜单「连接方式」人工指定（ini `link_override` 0/1/2）；有线鼠标提示由「电量 未知」改为「USB 直连供电，无需电量」；诊断日志每个接口多输出一行推导结果；同版把「连接方式」也做进插件设置窗口（下拉框 + 实时「当前识别」），与右键菜单、ini 三处等价（1.2.1 未单独发布，内容并入本版） |
+| **V1.2.3** | 修掉有线鼠标被显示成「2.4G 无线」：`LinkFromTransport` 对 USB 设备的兜底从「一律当成 2.4G 接收器」改为按证据分档（厂商 PID → 名称关键词 → 是否报电量 → 未知），新增 `UsbUnknown`（显示「USB 接口」）与右键菜单「连接方式」人工指定（ini `link_override` 0/1/2）；有线鼠标提示由「电量 未知」改为「USB 直连供电，无需电量」；诊断日志每个接口多输出一行推导结果；同版把「连接方式」也做进插件设置窗口（下拉框 + 实时「当前识别」），与右键菜单、ini 三处等价（1.2.1 未单独发布，内容并入本版） |
 | **V1.2.0** | 修复首次启动弹出「遇到不适当的参数」：根因是主程序把「主窗口 + 所有插件」的提示拼起来交给 MFC 的 `CToolTipCtrl::UpdateTipText`，超过 1024 字符即抛 `CInvalidArgException`（上游 #2413/#2411/#1219），而插件首次启动时走的是最长分支（还拼了完整日志路径）。提示改为两行精简 + 200 字符硬截断，细节挪到 `tooltip_detail=1`；修复雷柏鼠标卡顿：v1.0.15 的探活「2 秒窗口 × 20ms 轮询」把接收器厂商通道占满，输入报文排队；**探活改为默认关闭**，开启时窗口 1.2 秒、步长 60~160ms 并拿到应答即返回、用鼠标时不探、刚收到上报后 3 秒不探、人离开后放宽到 25 秒；**诊断日志改为默认关闭**（不写文件、不建目录） |
 | V1.0.18（未单独发布，已并入 V1.2.0） | 弹窗与卡顿的定位与首轮修复：提示文本精简、探活降频与应答即返回、光标活动时跳过探测 |
 | **V1.0.17** | 性能与稳定性优化：通用 HID 电量改为复用扫描时读到的值（不再每轮 `GET_FEATURE`，不再持续唤醒蓝牙鼠标）；HID 候选 / 蓝牙节点重扫间隔放宽到 15 秒 / 10 秒；日志关闭时启动不再做全量诊断；诊断日志不再每写一行都重复检查文件；「立即写入诊断」改由采集线程执行，消除 UI 线程与采集线程的并发访问；雷柏探测不可用时的离线回退恢复生效（阈值 4 分钟）；充电时电池图标增加带描边的闪电标记 |
@@ -486,7 +486,7 @@ v1.0.15 起探活改成「2 秒窗口内每 20ms 轮询特性报文」：一次�
 
 ---
 
-## 2026-11-02（续）· MouseStatus V1.2.2：有线鼠标不再被当成「2.4G 无线」，连接方式可在设置里选
+## 2026-11-02（续）· MouseStatus V1.2.3：有线鼠标不再被当成「2.4G 无线」，连接方式可在设置里选
 
 用户反馈：另一台电脑上是有线鼠标，插件却把「连接方式」显示成 `2.4G`。拿到的诊断日志（HID 接口清单）是：
 
@@ -545,3 +545,6 @@ V1.2.2 得 `USB 接口`；指定一次「USB 有线」即显示 `USB 有线`。
 ```
 
 「当前识别」由 1 秒定时器读采集线程的快照刷新，所以切换档位后不用关窗就能看到结果变化。
+
+> 「当前识别」只显示连接方式（如 `USB 接口`），不拼设备名 —— 那一格放不下长名字，
+> 折行会被裁掉；设备名在鼠标提示里能看到。
