@@ -61,10 +61,24 @@ jobs:
           }
           Write-Host "OK: TMPluginGetInstance exported"
 
-          # 2) 文件版本必须与 GetInfo(TMI_VERSION) 一致
+          # 2) 文件版本必须与 tag 对应（tag MouseStatus_V1.2.0 → FileVersion 1.2.0.0）
+          #    这里不写死具体版本号：以前写的是 '1.0.*'，结果 v1.1/v1.2 这样正常的版本升级
+          #    会在这一步被自己拦下来（编译本身是成功的，白等一轮）。
           $fv = $item.VersionInfo.FileVersion
-          if ($fv -notlike '1.0.*') { throw "unexpected file version: $fv" }
-          Write-Host "OK: file version $fv"
+          $tagName = $env:GITHUB_REF_NAME
+          if ($tagName -like 'MouseStatus_V*') {
+            $expected = $tagName.Substring('MouseStatus_V'.Length)
+            if ($fv -notlike "$expected.*") {
+              throw "file version $fv does not match tag version $expected"
+            }
+            Write-Host "OK: file version $fv matches tag $tagName"
+          }
+          elseif ($fv -notlike '1.*') {
+            throw "unexpected file version: $fv"
+          }
+          else {
+            Write-Host "OK: file version $fv"
+          }
 
           # 3) 中文界面文本必须按 UTF-16 正确落地（验证 /utf-8 生效）
           $uni = [System.Text.Encoding]::Unicode.GetString([System.IO.File]::ReadAllBytes($dll))
