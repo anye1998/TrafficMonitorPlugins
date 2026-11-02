@@ -91,6 +91,14 @@ public:
     static bool ProbeEnabled();
     static bool SetProbeEnabled(bool on);
 
+    // 人工指定连接方式（ini [config] link_override），只在 USB 一类上生效。
+    // 2.4G 接收器与有线鼠标在系统里无法区分，自动判定给不出结论时由用户拍板。
+    static constexpr int kLinkOverrideAuto = 0;    // 自动（默认）
+    static constexpr int kLinkOverrideWired = 1;   // 强制「USB 有线」
+    static constexpr int kLinkOverride24G = 2;     // 强制「2.4G 无线」
+    static int LinkOverride();
+    static bool SetLinkOverride(int mode);
+
 private:
     CMouseMonitor();
     ~CMouseMonitor();
@@ -231,6 +239,9 @@ private:
     // 探活开关：1 = 开，0 = 关，-1 = 尚未从 ini 读取（工作线程起来时解析一次）。
     // 同样用 Interlocked 访问，设置界面随时可以改，下一轮就生效。
     volatile LONG m_probe_enabled{ -1 };
+
+    // 连接方式的人工覆盖：0 自动 / 1 USB 有线 / 2 2.4G 无线，-1 表示尚未从 ini 读取。
+    volatile LONG m_link_override{ -1 };
 
     // UI 线程请求「立即写入诊断」的标志，由工作线程取走并执行，避免跨线程访问采集状态。
     volatile LONG m_dump_requested{ 0 };

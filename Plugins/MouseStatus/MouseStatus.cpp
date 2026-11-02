@@ -22,6 +22,7 @@ const wchar_t* LinkName(LinkKind link)
     case LinkKind::BluetoothLE: return L"蓝牙（低功耗）";
     case LinkKind::Wireless24G: return L"2.4G 无线";
     case LinkKind::UsbWired: return L"USB 有线";
+    case LinkKind::UsbUnknown: return L"USB 接口";
     default: break;
     }
     return L"未连接";
@@ -195,21 +196,29 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
     text += LinkName(state.link);
 
     // 电量和充电状态合成一行：既能一眼看完，又比老版本省下 20 多个字符
-    text += L"\n电量 ";
-    if (state.battery < 0)
+    if (state.link == LinkKind::UsbWired && state.battery < 0)
     {
-        text += L"未知";
-        if (detail)
-            text += L"（没有数据源能给出电量）";
+        // 有线鼠标本来就没有电池，写「电量 未知」会让人以为读数坏了
+        text += L"\nUSB 直连供电，无需电量";
     }
     else
     {
-        text += ToWString(state.battery);
-        text += L"%（";
-        text += ChargeName(state.charge);
-        text += L"）";
-        if (state.battery_is_stale)
-            text += L" 上次读数";
+        text += L"\n电量 ";
+        if (state.battery < 0)
+        {
+            text += L"未知";
+            if (detail)
+                text += L"（没有数据源能给出电量）";
+        }
+        else
+        {
+            text += ToWString(state.battery);
+            text += L"%（";
+            text += ChargeName(state.charge);
+            text += L"）";
+            if (state.battery_is_stale)
+                text += L" 上次读数";
+        }
     }
 
     if (detail)
@@ -223,6 +232,13 @@ void CMouseStatus::BuildTooltip(const MouseSnapshot& state)
             source += L"（系统缓存值）";
         }
         AppendLine(text, source.c_str());
+
+        if (state.link == LinkKind::UsbUnknown)
+        {
+            // 判不出来就说明白为什么，并给出出路：右键菜单里可以人工指定
+            AppendLine(text, L"连接方式无法自动判断（设备不报电量，名称里也没有无线字样），"
+                             L"可在右键菜单「连接方式」里指定");
+        }
 
         // 两个时间分开显示：「读数更新于」是数值真正变化的时刻（数据新鲜度），
         // 「最近检查」是插件最后一次轮询的时刻（只说明插件还在盯着）。
@@ -265,7 +281,7 @@ const wchar_t* CMouseStatus::GetInfo(PluginInfoIndex index)
     case TMI_COPYRIGHT:
         return L"MIT License";
     case TMI_VERSION:
-        return L"1.2.0";
+        return L"1.2.1";
     case TMI_URL:
         return L"https://github.com/anye1998/TrafficMonitorPlugins";
     default:
@@ -315,10 +331,11 @@ void* CMouseStatus::GetPluginIcon()
 namespace {
 
 constexpr int kCmdToggleProbe = 0;
-constexpr int kCmdToggleLog = 1;
-constexpr int kCmdClearLog = 2;
-constexpr int kCmdOpenFolder = 3;
-constexpr int kCmdDumpNow = 4;
+constexpr int kCmdLinkMode = 1;
+constexpr int kCmdToggleLog = 2;
+constexpr int kCmdClearLog = 3;
+constexpr int kCmdOpenFolder = 4;
+constexpr int kCmdDumpNow = 5;
 
 // TrafficMonitor 的插件命令 ID 段（主程序 resource.h 里的
 // ID_PLUGIN_COMMAND_START / ID_PLUGIN_COMMAND_MAX）。主窗口菜单在查勾选状态时
@@ -330,7 +347,7 @@ constexpr int kCommandIdMax = 33664;
 
 int CMouseStatus::GetCommandCount()
 {
-    return 5;
+    return 6;
 }
 
 const wchar_t* CMouseStatus::GetCommandName(int command_index)
@@ -338,6 +355,16 @@ const wchar_t* CMouseStatus::GetCommandName(int command_index)
     switch (command_index)
     {
     case kCmdToggleProbe: return L"主动探测鼠标在线状态";
+    case kCmdLinkMode:
+    {
+        // 菜单文字要反映当前设置，否则用户点完不知道到自己切到哪一档了
+        static wchar_t text[64] = { 0 };
+        const int mode = CMouseMonitor::LinkOverride();
+        const wchar_t* name = (mode == CMouseMonitor::kLinkOverrideWired) ? L"USB 有线"
+            : (mode == CMouseMonitor::kLinkOverride24G) ? L"2.4G 无线" : L"自动";
+        ::swprintf_s(text, L"连接方式：%s（点击切换）", name);
+        return text;
+    }
     case kCmdToggleLog: return L"启用诊断日志";
     case kCmdClearLog: return L"清空诊断日志";
     case kCmdOpenFolder: return L"打开日志文件夹";
@@ -368,6 +395,11 @@ void CMouseStatus::OnPluginCommand(int command_index, void* hWnd, void* para)
     {
     case kCmdToggleProbe:
         CMouseMonitor::SetProbeEnabled(!CMouseMonitor::ProbeEnabled());
+        break;
+    case kCmdLinkMode:
+        // 三档循环：自动 → USB 有线 → 2.4G 无线 → 自动
+        CMouseMonitor::SetLinkOverride((CMouseMonitor::LinkOverride() + 1)
+            % (CMouseMonitor::kLinkOverride24G + 1));
         break;
     case kCmdToggleLog:
         diag::SetEnabled(!diag::Enabled());

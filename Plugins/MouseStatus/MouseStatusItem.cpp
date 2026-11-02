@@ -35,6 +35,10 @@ std::wstring FormatLink(const MouseSnapshot& state)
         return L"2.4G";
     case LinkKind::UsbWired:
         return L"USB";
+    case LinkKind::UsbUnknown:
+        // 判不出是有线还是接收器，但「走的是 USB 接口」这件事是确定的，
+        // 不能落到 default 里去显示「--」（那会被读成「没检测到鼠标」）。
+        return L"USB";
     default:
         break;
     }

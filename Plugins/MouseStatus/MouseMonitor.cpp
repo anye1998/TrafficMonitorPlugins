@@ -106,6 +106,7 @@ const wchar_t* LinkText(LinkKind link)
     case LinkKind::BluetoothLE: return L"蓝牙LE";
     case LinkKind::Wireless24G: return L"2.4G";
     case LinkKind::UsbWired: return L"USB有线";
+    case LinkKind::UsbUnknown: return L"USB";
     default: break;
     }
     return L"无";
@@ -162,8 +163,19 @@ ChargeKind DeriveCharge(LinkKind link, int battery, bool charging)
 }
 
 // 由传输层与 VID/PID/产品名推断连接方式
+//
+// USB 这一段本质上是**推断**，而且必须承认它只能推断：2.4G 接收器与有线鼠标在系统里
+// 长得一模一样（都是 USB 上的 HID 鼠标，接收器本身还是常驻设备），Windows 也没有
+// 「这条链路是不是无线」的属性可查。所以按证据强弱分档，全都判不出来就报 UsbUnknown：
+//   1) 厂商 PID 规则（最硬的事实，雷柏 0x46xx 插线 / 0x14xx 接收器）；
+//   2) 产品名里的关键词（不少接收器自报 "USB Receiver"、"2.4G Wireless Dongle"）；
+//   3) 是否上报电量（电池供电的鼠标几乎必然要报，有线鼠标没有电池可报）；
+//   4) 都没有 —— 报 UsbUnknown，显示成「USB 接口」。
+//
+// 老版本第 4 步直接返回 Wireless24G，于是**所有**既没电量又没写「wired」的有线鼠标
+// 都被标成「2.4G 无线」（用户反馈：有线鼠标连接方式显示不对）。错在把猜测当结论。
 LinkKind LinkFromTransport(HidTransport transport, unsigned short vid, unsigned short pid,
-    const std::wstring& product)
+    const std::wstring& product, bool reports_battery)
 {
     switch (transport)
     {
@@ -174,23 +186,79 @@ LinkKind LinkFromTransport(HidTransport transport, unsigned short vid, unsigned 
     case HidTransport::Usb:
     {
         // 雷柏：0x46xx 是插线状态下的节点，0x14xx 是接收器节点
-        if (vid == rapoo::VENDOR_ID && (pid & 0xFF00) == 0x4600)
-            return LinkKind::UsbWired;
+        if (vid == rapoo::VENDOR_ID)
+        {
+            if ((pid & 0xFF00) == 0x4600)
+                return LinkKind::UsbWired;
+            if ((pid & 0xFF00) == 0x1400)
+                return LinkKind::Wireless24G;
+        }
 
-        // 其余 USB 设备：能上报电量基本可以断定是接收器（无线）；
-        // 产品名里明确写着有线的再修正为有线
         const std::wstring lower = ToLower(product);
+
+        // 产品名里明确写着有线的（"USB Wired Mouse" / "有线鼠标"）
         if (lower.find(L"wired") != std::wstring::npos
             || lower.find(L"有线") != std::wstring::npos)
         {
             return LinkKind::UsbWired;
         }
-        return LinkKind::Wireless24G;
+
+        // 产品名里写着无线的（接收器常见自报："USB Receiver"、"2.4G Wireless Device"、
+        // "2.4G Dongle"、"无线接收器"）。注意别把 "USB" 当线索 —— 有线鼠标的名字里
+        // 几乎都带 USB。
+        static const wchar_t* const kWirelessHints[] = {
+            L"2.4g", L"2.4 g", L"wireless", L"receiver", L"dongle", L"无线", L"接收器",
+        };
+        for (const wchar_t* hint : kWirelessHints)
+        {
+            if (lower.find(hint) != std::wstring::npos)
+                return LinkKind::Wireless24G;
+        }
+
+        // 能上报电量：几乎只可能是电池供电的鼠标（有线鼠标没有电池可报），
+        // 而电池鼠标对外只表现为「USB 上的接收器」——这已经很接近结论了。
+        if (reports_battery)
+            return LinkKind::Wireless24G;
+
+        return LinkKind::UsbUnknown;
     }
     default:
         break;
     }
     return LinkKind::None;
+}
+
+// 人工指定连接方式（ini [config] link_override：0 自动 / 1 USB 有线 / 2 2.4G 无线）。
+// 只在「USB 这一类」上生效：蓝牙链路有系统给出的明确事实，不该被人手覆盖掉。
+LinkKind ApplyLinkOverride(LinkKind link)
+{
+    if (link != LinkKind::UsbWired && link != LinkKind::Wireless24G
+        && link != LinkKind::UsbUnknown)
+    {
+        return link;
+    }
+
+    switch (CMouseMonitor::LinkOverride())
+    {
+    case CMouseMonitor::kLinkOverrideWired: return LinkKind::UsbWired;
+    case CMouseMonitor::kLinkOverride24G: return LinkKind::Wireless24G;
+    default: break;
+    }
+    return link;
+}
+
+// 设备没有产品名时的兜底名称。
+// 别给有线鼠标、以及判断不出连接方式的设备乱扣「无线」的帽子。
+const wchar_t* DefaultMouseName(LinkKind link)
+{
+    switch (link)
+    {
+    case LinkKind::Bluetooth:
+    case LinkKind::BluetoothLE: return L"蓝牙鼠标";
+    case LinkKind::Wireless24G: return L"无线鼠标";
+    default: break;
+    }
+    return L"鼠标";
 }
 
 } // namespace
@@ -344,6 +412,34 @@ bool CMouseMonitor::SetProbeEnabled(bool on)
     return diag::SetConfigInt(L"probe_enabled", on ? 1 : 0);
 }
 
+int CMouseMonitor::LinkOverride()
+{
+    const LONG cached =
+        ::InterlockedCompareExchange((volatile LONG*)&Instance().m_link_override, -1, -1);
+    if (cached >= 0)
+        return (int)cached;
+
+    return diag::GetConfigInt(L"link_override", kLinkOverrideAuto,
+        kLinkOverrideAuto, kLinkOverride24G);
+}
+
+bool CMouseMonitor::SetLinkOverride(int mode)
+{
+    if (mode < kLinkOverrideAuto || mode > kLinkOverride24G)
+        mode = kLinkOverrideAuto;
+
+    CMouseMonitor& self = Instance();
+    ::InterlockedExchange((volatile LONG*)&self.m_link_override, (LONG)mode);
+
+    // 叫醒采集线程，让下一轮立刻按新设置重新判定（否则最多等一个采集周期）
+    if (self.m_wake != nullptr)
+        ::SetEvent(self.m_wake);
+
+    static const wchar_t* const kNames[] = { L"自动", L"USB 有线", L"2.4G 无线" };
+    diag::Log(L"连接方式已设为：%s", kNames[mode]);
+    return diag::SetConfigInt(L"link_override", mode);
+}
+
 // 用户是否已经离开：一段时间内没有任何键盘/鼠标输入。
 // 用来把探测间隔放宽 —— 人不在电脑前，状态栏没人看，没必要每 4 秒去戳一下鼠标。
 namespace {
@@ -389,10 +485,16 @@ void CMouseMonitor::Run()
     ::InterlockedExchange((volatile LONG*)&m_probe_enabled, probe_on ? 1 : 0);
     diag::Log(L"主动探测：%s（ini 键 probe_enabled，默认关闭）",
         probe_on ? L"开启" : L"关闭（关机靠沉默时长判定，约 4 分钟）");
+    {
+        static const wchar_t* const kModeNames[] = { L"自动", L"USB 有线", L"2.4G 无线" };
+        diag::Log(L"连接方式：%s（ini 键 link_override，默认自动）",
+            kModeNames[LinkOverride()]);
+    }
 
     // 把可调项摆到 ini 里（键已存在就不动），这样用户打开配置文件就知道能调什么
     diag::EnsureConfigInt(L"refresh_interval_ms", period_ms);
     diag::EnsureConfigInt(L"probe_enabled", probe_on ? 1 : 0);
+    diag::EnsureConfigInt(L"link_override", LinkOverride());
 
     while (::WaitForSingleObject(m_stop, 0) == WAIT_TIMEOUT)
     {
@@ -545,6 +647,12 @@ void CMouseMonitor::DumpDiagnosticsOnce()
             (unsigned)m.vid, (unsigned)m.pid, TransportText(m.transport),
             (unsigned)m.usage_page, (unsigned)m.usage, m.has_battery_usage ? 1 : 0,
             m.battery_percent, m.product.c_str());
+        // 顺手把推导结果写出来：用户反馈「连接方式显示不对」时，看这一行就知道
+        // 依据是哪一档（厂商 PID / 名称关键词 / 是否报电量 / 都没有）
+        diag::Log(L"    => 推导连接方式：%s（link_override=%d）",
+            LinkText(ApplyLinkOverride(LinkFromTransport(m.transport, m.vid, m.pid,
+                m.product, m.has_battery_usage || m.battery_percent >= 0))),
+            CMouseMonitor::LinkOverride());
     }
 
     // 读一遍 feature 报文：不少蓝牙鼠标把电量放在厂商自定义集合里，
@@ -1174,7 +1282,9 @@ SourceResult CMouseMonitor::PollRapoo()
 
     result.valid = true;
     // 连接方式只看系统枚举事实：PID 0x46xx = 鼠标插线直连，0x14xx = 2.4G 接收器
-    result.link = m_ep.pid_wired ? LinkKind::UsbWired : LinkKind::Wireless24G;
+    // （这条是厂商 PID 规则，比下面的推断硬，但仍然允许用户用 link_override 覆盖）
+    result.link = ApplyLinkOverride(
+        m_ep.pid_wired ? LinkKind::UsbWired : LinkKind::Wireless24G);
     result.battery = m_rapoo_battery;
     // 「2.4G 连接 + 插着充电线」也能被正确识别，靠的就是设备自报的充电位
     result.charging = m_rapoo_charging;
@@ -1354,16 +1464,12 @@ SourceResult CMouseMonitor::PollHidBattery()
             continue;
 
         result.valid = true;
-        result.link = LinkFromTransport(candidate.transport, candidate.vid, candidate.pid,
-            candidate.product);
+        result.link = ApplyLinkOverride(LinkFromTransport(candidate.transport, candidate.vid,
+            candidate.pid, candidate.product, /*reports_battery=*/true));
         result.battery = candidate.battery;
         result.name = candidate.product;
         if (result.name.empty())
-        {
-            result.name = (result.link == LinkKind::Bluetooth
-                              || result.link == LinkKind::BluetoothLE)
-                ? L"蓝牙鼠标" : L"无线鼠标";
-        }
+            result.name = DefaultMouseName(result.link);
         return result;
     }
 
@@ -1413,15 +1519,14 @@ SourceResult CMouseMonitor::PollHidBattery()
 
         result.valid = true;
         result.battery = first->battery_percent;   // 扫描时读到过就用，读不到是 -1
-        result.link = LinkFromTransport(first->transport, first->vid, first->pid,
-            first->product);
+        // 「是否报过电量」按扫描结果判断：有的接口能给出电池用途但读不出数值，
+        // 那也说明这是台电池设备（有线鼠标不会有电池用途）。
+        result.link = ApplyLinkOverride(LinkFromTransport(first->transport, first->vid,
+            first->pid, first->product,
+            /*reports_battery=*/first->has_battery_usage || first->battery_percent >= 0));
         result.name = first->product;
         if (result.name.empty())
-        {
-            result.name = (result.link == LinkKind::Bluetooth
-                              || result.link == LinkKind::BluetoothLE)
-                ? L"蓝牙鼠标" : L"无线鼠标";
-        }
+            result.name = DefaultMouseName(result.link);
     }
     return result;
 }
