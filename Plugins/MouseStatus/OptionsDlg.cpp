@@ -12,9 +12,13 @@ namespace {
 
 // 客户区设计尺寸（96 DPI），实际尺寸按所在显示器的 DPI 缩放
 constexpr int kClientWidth = 440;
-constexpr int kClientHeight = 330;
+constexpr int kClientHeight = 394;
 
 const wchar_t* const kWindowClass = L"MouseStatusOptionsWindow";
+
+// 「当前识别」标签的刷新定时器：采集线程每秒出一次快照，这里跟着它走，
+// 用户切换连接方式后能立刻看到识别结果变化。
+constexpr UINT_PTR kTimerRefreshLink = 1;
 
 // 取本 DLL 的模块句柄（不能依赖 MFC 的 AfxGetInstanceHandle）
 char g_options_anchor = 0;
@@ -27,6 +31,8 @@ enum : int
 {
     IDC_CHK_LOG = 1001,
     IDC_CHK_PROBE,
+    IDC_COMBO_LINK,
+    IDC_STATIC_LINK_NOW,
     IDC_EDIT_PATH,
     IDC_STATIC_SIZE,
     IDC_EDIT_INI,
@@ -45,12 +51,15 @@ struct OptionsUi
     HWND hwnd{ nullptr };
     HWND chk_log{ nullptr };
     HWND chk_probe{ nullptr };
+    HWND combo_link{ nullptr };
+    HWND static_link_now{ nullptr };
     HWND edit_path{ nullptr };
     HWND static_size{ nullptr };
     HWND edit_ini{ nullptr };
     HWND edit_period{ nullptr };
     bool initial{ true };          // 打开窗口时的日志开关状态
     bool initial_probe{ false };   // 打开窗口时的探活开关状态
+    int initial_link{ 0 };         // 打开窗口时的连接方式设置
     bool changed{ false };
     bool done{ false };
     int scale{ 100 };   // DPI 缩放百分比
@@ -142,6 +151,50 @@ bool ApplyPeriod(OptionsUi* ui, bool silent)
     return true;
 }
 
+// 连接方式的显示名（与状态栏 / 提示文本保持一致的说法）
+const wchar_t* LinkTextLocal(LinkKind link)
+{
+    switch (link)
+    {
+    case LinkKind::Bluetooth: return L"蓝牙";
+    case LinkKind::BluetoothLE: return L"蓝牙（低功耗）";
+    case LinkKind::Wireless24G: return L"2.4G 无线";
+    case LinkKind::UsbWired: return L"USB 有线";
+    case LinkKind::UsbUnknown: return L"USB 接口";
+    default: break;
+    }
+    return L"未连接";
+}
+
+// 把下拉框选中项设成当前生效的档位
+void FillLinkCombo(OptionsUi* ui)
+{
+    if (ui == nullptr || ui->combo_link == nullptr)
+        return;
+    const int mode = CMouseMonitor::LinkOverride();
+    ::SendMessageW(ui->combo_link, CB_SETCURSEL, (WPARAM)mode, 0);
+}
+
+// 刷新「当前识别」标签：直接读采集线程维护的快照，用户改完能立刻看到结果
+void RefreshLinkNow(OptionsUi* ui)
+{
+    if (ui == nullptr || ui->static_link_now == nullptr)
+        return;
+
+    MouseSnapshot snap;
+    CMouseMonitor::Instance().GetSnapshot(snap);
+
+    std::wstring text = L"当前识别：";
+    text += snap.live ? LinkTextLocal(snap.link) : L"未连接";
+    if (snap.live && !snap.device_name.empty())
+    {
+        text += L"（";
+        text += snap.device_name;
+        text += L"）";
+    }
+    ::SetWindowTextW(ui->static_link_now, text.c_str());
+}
+
 HWND MakeChild(OptionsUi* ui, const wchar_t* cls, const wchar_t* text, DWORD style, DWORD ex_style,
     int x, int y, int w, int h, int id)
 {
@@ -160,7 +213,7 @@ void CreateChildren(OptionsUi* ui)
     const int inner = kClientWidth - 32;   // 左右各留 16
 
     // 顶部说明
-    MakeChild(ui, L"STATIC", L"下面两个开关都默认关闭，需要排障或更快的关机识别时再打开。",
+    MakeChild(ui, L"STATIC", L"日志与探活默认关闭；连接方式默认「自动」，判不出来时在下面指定。",
         SS_LEFT, 0, 16, 14, inner, 18, -1);
 
     ui->chk_log = MakeChild(ui, L"BUTTON", L"启用诊断日志",
@@ -180,42 +233,64 @@ void CreateChildren(OptionsUi* ui)
         L"开启：关机 4~8 秒识别；代价是每 4 秒查询一次（用鼠标时不查）。",
         SS_LEFT, 0, 16, 86, inner, 34, -1);
 
-    // 日志文件
-    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 128, inner, 16, -1);
-    ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 146, inner, 24, IDC_EDIT_PATH);
+    // 连接方式 —— 2.4G 接收器与有线鼠标在系统里无法区分，自动判定给不出结论时由用户拍板
+    MakeChild(ui, L"STATIC", L"连接方式：", SS_LEFT, 0, 16, 126, 76, 18, -1);
+    ui->combo_link = MakeChild(ui, L"COMBOBOX", L"",
+        CBS_DROPDOWNLIST | CBS_HASSTRINGS | WS_VSCROLL | WS_TABSTOP,
+        WS_EX_CLIENTEDGE, 96, 122, 150, 200, IDC_COMBO_LINK);
+    if (ui->combo_link != nullptr)
+    {
+        ::SendMessageW(ui->combo_link, CB_ADDSTRING, 0, (LPARAM)L"自动（默认）");
+        ::SendMessageW(ui->combo_link, CB_ADDSTRING, 0, (LPARAM)L"USB 有线");
+        ::SendMessageW(ui->combo_link, CB_ADDSTRING, 0, (LPARAM)L"2.4G 无线");
+        FillLinkCombo(ui);
+    }
+    ui->static_link_now = MakeChild(ui, L"STATIC", L"", SS_LEFT,
+        0, 252, 126, 172, 18, IDC_STATIC_LINK_NOW);
+    RefreshLinkNow(ui);
 
-    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 176, inner, 16, IDC_STATIC_SIZE);
+    MakeChild(ui, L"STATIC",
+        L"自动：按厂商 PID、产品名关键词、是否上报电量依次判断。\r\n"
+        L"都判不出来时显示「USB 接口」（有线/无线不猜），此时可在这里指定。",
+        SS_LEFT, 0, 16, 152, inner, 32, -1);
+
+    // 日志文件
+    MakeChild(ui, L"STATIC", L"日志文件位置：", SS_LEFT, 0, 16, 192, inner, 16, -1);
+    ui->edit_path = MakeChild(ui, L"EDIT", diag::LogFilePath().c_str(),
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 210, inner, 24, IDC_EDIT_PATH);
+
+    ui->static_size = MakeChild(ui, L"STATIC", L"", SS_LEFT, 0, 16, 240, inner, 16, IDC_STATIC_SIZE);
     RefreshSizeLabel(ui);
 
-    // 采集周期 —— 这是本插件唯一一个会明显影响行为的设置项
-    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 202, 120, 18,
+    // 采集周期 —— 这是本插件唯一一个会明显影响行为的时间类设置项
+    MakeChild(ui, L"STATIC", L"采集周期（毫秒）：", SS_LEFT, 0, 16, 266, 120, 18,
         IDC_STATIC_PERIOD);
     ui->edit_period = MakeChild(ui, L"EDIT", L"",
-        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 199, 72, 24, IDC_EDIT_PERIOD);
+        ES_LEFT | ES_NUMBER | WS_TABSTOP, WS_EX_CLIENTEDGE, 140, 263, 72, 24, IDC_EDIT_PERIOD);
     FillPeriodEdit(ui);
-    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 198, 56, 26,
+    MakeChild(ui, L"BUTTON", L"应用", BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 220, 262, 56, 26,
         IDC_BTN_APPLY);
     {
         wchar_t hint[64] = { 0 };
         ::swprintf_s(hint, L"%d ~ %d", kMinLoopPeriodMs, kMaxLoopPeriodMs);
-        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 202, 140, 18, IDC_STATIC_PERIOD_HINT);
+        MakeChild(ui, L"STATIC", hint, SS_LEFT, 0, 284, 266, 140, 18, IDC_STATIC_PERIOD_HINT);
     }
 
     // 配置文件（ini）—— 和 Battery / DateTime 等插件放在同一个目录
-    MakeChild(ui, L"STATIC", L"插件配置文件（ini，日志开关 / 探活开关 / 采集周期保存在这里）：",
-        SS_LEFT, 0, 16, 232, inner, 16, -1);
+    MakeChild(ui, L"STATIC",
+        L"插件配置文件（ini，日志 / 探活 / 连接方式 / 采集周期保存在这里）：",
+        SS_LEFT, 0, 16, 296, inner, 16, -1);
     ui->edit_ini = MakeChild(ui, L"EDIT", diag::ConfigFilePath().c_str(),
-        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 250, inner, 24, IDC_EDIT_INI);
+        ES_LEFT | ES_READONLY | WS_TABSTOP, WS_EX_CLIENTEDGE, 16, 314, inner, 24, IDC_EDIT_INI);
 
     // 按钮行
-    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 286, 96, 28,
+    MakeChild(ui, L"BUTTON", L"打开文件夹", BS_PUSHBUTTON | WS_TABSTOP, 0, 16, 350, 96, 28,
         IDC_BTN_OPEN);
-    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 286, 96, 28,
+    MakeChild(ui, L"BUTTON", L"清空日志", BS_PUSHBUTTON | WS_TABSTOP, 0, 120, 350, 96, 28,
         IDC_BTN_CLEAR);
-    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 286, 110, 28,
+    MakeChild(ui, L"BUTTON", L"立即写入诊断", BS_PUSHBUTTON | WS_TABSTOP, 0, 224, 350, 110, 28,
         IDC_BTN_DUMP);
-    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 286, 72, 28,
+    MakeChild(ui, L"BUTTON", L"关闭", BS_PUSHBUTTON | WS_TABSTOP, 0, 352, 350, 72, 28,
         IDC_BTN_CLOSE);
 }
 
@@ -232,8 +307,16 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         ::SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ui);
         ui->hwnd = hwnd;
         CreateChildren(ui);
+        ::SetTimer(hwnd, kTimerRefreshLink, 1000, nullptr);
         return 0;
     }
+    case WM_TIMER:
+        if (ui != nullptr && wparam == kTimerRefreshLink)
+        {
+            RefreshLinkNow(ui);
+            return 0;
+        }
+        break;
     case WM_COMMAND:
     {
         if (ui == nullptr)
@@ -241,6 +324,20 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         const int id = LOWORD(wparam);
         const int code = HIWORD(wparam);
 
+        if (id == IDC_COMBO_LINK && code == CBN_SELCHANGE)
+        {
+            const int mode = (int)::SendMessageW(ui->combo_link, CB_GETCURSEL, 0, 0);
+            if (mode >= CMouseMonitor::kLinkOverrideAuto
+                && mode <= CMouseMonitor::kLinkOverride24G)
+            {
+                // 立即生效：写 ini + 置内存标志 + 唤醒采集线程，与右键菜单那条命令等价
+                CMouseMonitor::SetLinkOverride(mode);
+                if (mode != ui->initial_link)
+                    ui->changed = true;
+                RefreshLinkNow(ui);
+            }
+            return 0;
+        }
         if (id == IDC_CHK_LOG && code == BN_CLICKED)
         {
             const bool checked = (::SendMessageW(ui->chk_log, BM_GETCHECK, 0, 0) == BST_CHECKED);
@@ -323,6 +420,7 @@ LRESULT CALLBACK OptionsProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
         ::DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        ::KillTimer(hwnd, kTimerRefreshLink);
         if (ui != nullptr)
             ui->done = true;
         return 0;
@@ -402,6 +500,7 @@ bool ShowMouseStatusOptions(void* parent)
     OptionsUi ui;
     ui.initial = diag::Enabled();
     ui.initial_probe = CMouseMonitor::ProbeEnabled();
+    ui.initial_link = CMouseMonitor::LinkOverride();
     ui.changed = false;
 
     const int dpi = QueryDpi(parent_wnd);
@@ -409,7 +508,7 @@ bool ShowMouseStatusOptions(void* parent)
     if (ui.scale < 100)
         ui.scale = 100;
 
-    // 布局按「客户区 440x240」设计，这里换算成含标题栏的整窗尺寸
+    // 布局按「客户区 440x394」设计，这里换算成含标题栏的整窗尺寸
     const DWORD win_style = WS_POPUP | WS_CAPTION | WS_SYSMENU;
     const DWORD win_ex_style = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
     RECT frame = { 0, 0, MulDiv(kClientWidth, ui.scale, 100), MulDiv(kClientHeight, ui.scale, 100) };
