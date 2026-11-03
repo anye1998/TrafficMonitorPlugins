@@ -352,6 +352,15 @@ namespace HardwareMonitor
         }
         catch (System::Exception^)
         {
+            //万一在“关掉再打开”的过程中出错，尽量把电池监控恢复成开启状态：
+            //否则IsBatteryEnabled会停在false，下一次保存配置就把“关闭电池”写进ini了
+            try
+            {
+                MonitorGlobal::Instance()->computer->IsBatteryEnabled = true;
+            }
+            catch (System::Exception^)
+            {
+            }
         }
         HardwareMonitorHelper::RebuildSensorIndex();
     }
@@ -480,8 +489,9 @@ namespace HardwareMonitor
             //电池类监控项读不到数据时，尝试重新枚举电池设备
             TryRecoverBatteryGroup();
 
-            //监控项名称/类型是后来才补上的，写回配置文件（只写一次）
-            if (m_config_backfilled)
+            //监控项名称/类型是后来才补上的，写回配置文件（只写一次）。
+            //有窗口开着时不写：ini是整文件覆盖保存的，避免和UI线程的保存相互踩踏
+            if (m_config_backfilled && MonitorGlobal::Instance()->setttings_form == nullptr && MonitorGlobal::Instance()->monitor_form == nullptr)
                 SaveConfig();
         }
         catch (System::Exception^)
