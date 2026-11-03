@@ -177,7 +177,10 @@ namespace HardwareMonitor
             ISensor^ sensor = HardwareMonitorHelper::FindSensorByIdentifyer(gcnew String(item_info.identifyer.c_str()));
             if (sensor != nullptr)
             {
-                //从传感器回填名称和类型（旧版本的配置文件里没有这两项）
+                //从传感器回填名称和类型（旧版本的配置文件里没有这两项），并标记写回配置文件，
+                //这样以后即使开机时认不出传感器，界面上也还能显示正确的名称
+                if (item_info.item_name.empty() || item_info.sensor_type < 0)
+                    NotifyConfigBackfilled();
                 item_info.item_name = Common::StringToStdWstring(HardwareMonitorHelper::GetSensorDisplayName(sensor));
                 item_info.sensor_type = static_cast<int>(sensor->SensorType);
             }
@@ -384,6 +387,7 @@ namespace HardwareMonitor
             if (missing_count == 0)
             {
                 m_battery_missing_count = 0;
+                m_battery_recover_attempts = 0;
                 return;
             }
 
@@ -401,7 +405,12 @@ namespace HardwareMonitor
             if (MonitorGlobal::Instance()->monitor_form != nullptr || MonitorGlobal::Instance()->setttings_form != nullptr)
                 return;
 
+            //重试用完就不再打扰硬件了（例如台式机上残留了一个电池监控项，永远也等不到电池）
+            if (m_battery_recover_attempts >= 5)
+                return;
+
             m_last_battery_recover = now;
+            m_battery_recover_attempts++;
             RefreshBatteryGroup();
         }
         catch (System::Exception^)
@@ -498,7 +507,7 @@ namespace HardwareMonitor
             return L"https://github.com/zhongyang219/TrafficMonitorPlugins";
             break;
         case TMI_VERSION:
-            return L"1.0.2";
+            return L"1.0.3";
         default:
             break;
         }

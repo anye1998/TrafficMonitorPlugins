@@ -13,7 +13,7 @@
 >
 > - 修改记录：[本 Fork 修改记录](#本-fork-修改记录)
 > - **下载编译好的插件 —— [MouseStatus V1.2.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/MouseStatus_V1.2.3)**（新）
-> - **下载编译好的插件 —— [HardwareMonitor V1.0.2](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.2)**
+> - **下载编译好的插件 —— [HardwareMonitor V1.0.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.3)**（新：修掉电池监控项开机/休眠后消失、数值卡住）
 > - [`MouseStatus` 插件说明](#2026-11-01--新增-mousestatus-插件状态栏显示鼠标电量与连接方式)
 > - 「必须管理员才能看温度」的原因与解决办法：[`tools/privilege/`](./tools/privilege/README.md)
 
@@ -548,3 +548,67 @@ V1.2.2 得 `USB 接口`；指定一次「USB 有线」即显示 `USB 有线`。
 
 > 「当前识别」只显示连接方式（如 `USB 接口`），不拼设备名 —— 那一格放不下长名字，
 > 折行会被裁掉；设备名在鼠标提示里能看到。
+
+---
+
+## 2026-11-03 · HardwareMonitor V1.0.3：电池监控项不再「开机消失」，数值也不再卡住
+
+**性质**：本 Fork 的本地修改，**由 AI 助手（WorkBuddy）完成分析与实现**，未提交到上游。
+下载：[HardwareMonitor V1.0.3](https://github.com/anye1998/TrafficMonitorPlugins/releases/tag/HardwareMonitor_V1.0.3)。
+版本号三处已同步：`app.rc` 文件版本 **1.0.3.0**、`GetInfo(TMI_VERSION)` **1.0.3**（「插件管理」里显示的那个）、`plugins_version.xml` **1.03**。
+
+### 症状
+
+笔记本上只勾选了电池信息：
+
+1. 开机后电池信息**有时不显示**；进「插件设置」一看，电池那一行不见了，得自己重新添加；
+2. 重新添加后，用一段时间电池数值**卡住不动**；
+3. 重启主程序后电池又不显示了，插件里的项目也再次消失。
+
+### 根因：三个症状是同一串问题的不同阶段（都在插件侧）
+
+| # | 位置 | 问题 |
+|---|---|---|
+| 1 | `LoadConfig` | 只给「当时能查到传感器」的配置项创建显示项。开机那一刻电池设备可能还没被枚举出来（LibreHardwareMonitor 的 `BatteryGroup` 是在构造时用 `SetupDiGetClassDevs(GUID_DEVICE_BATTERY)` 找设备的，一个都找不到就一个传感器也没有），这一项直接被跳过 |
+| 2 | `GetItem(index)` | 插件少交出一项 → 主程序侧「显示顺序」是按**下标**存的（`CTaskbarItemOrderHelper::m_item_order`），`NormalizeItemOrder()` 还会把越界序号删掉、把缺的补在末尾。插件的项目数一变，用户配好的显示项就整体错位，主程序把错位后的状态再存一次就固化了 |
+| 3 | `SettingsForm::UpdateItemList` | 传感器找不到的行直接 `continue` 跳过 → 看起来就是「电池监控的项目没了」 |
+| 4 | `FindSensorByIdentifyer` | 连「找不到」也当成结果写进 `sensorMap` 永久缓存 → 第一次没找到，这一整轮运行都别再想找到 |
+| 5 | identifier 生成 | identifier 由「硬件路径 + 类型 + **名称**」拼成，而电池的功率/电流传感器会随充放电**改名**（`Charge Rate` / `Discharge Rate` / `Charge/Discharge Rate`），电池硬件的标识里还带着会变的 `BatteryTag` → 充电/放电一换，identifier 就对不上 |
+| 6 | `DataRequired` | 整个循环只套了一个 try/catch。硬件重建后旧 `ISensor` 失效，取数抛异常 → 排在后面的项目**全部停止刷新** |
+| 7 | `RemoveDisplayItem` | 删除是「按列表下标删配置」。列表行一旦因为跳过而与配置项错位，删掉的就是**别的项目** —— 电池项被误删、项目越用越少 |
+
+其中第 5 条是「卡住」的关键：旧代码把查到的 `ISensor` 对象缓存起来，充放电切换后 identifier 变了、查不到新的，但**缓存里的旧对象还在**，于是它继续返回上一次的读数 —— 数字就冻在那里了。
+
+### 改法
+
+| 改动 | 说明 |
+|---|---|
+| 监控项与配置项**一一对应** | `LoadConfig` 给每个配置项都创建显示项，传感器暂时找不到也保留（显示 `--`）。`GetItem(index)` 的数量和顺序因此永远等于 `items_info`，主程序按索引存的显示顺序不会再错位 |
+| 传感器索引**每轮重建** | 每轮 `Accept()` 之后整体重建 `identifier → sensor` 索引（先建新的、再整体替换），索引里只包含当前**激活**的传感器；不再缓存「找不到」 |
+| identifier **宽松匹配** | 精确匹配失败时，按「去掉电池 `BatteryTag`、把充放电三种改名归一到同一个键」再找一次。配置里的 identifier **绝不改写**（它是主程序的项目 ID `7KrUeFVl_<identifier>`，改了等于换了一个项目） |
+| 电池设备**自动重枚举** | 电池项连续 3 轮读不到 → 把 `IsBatteryEnabled` 关掉再打开（LibreHardwareMonitor 只有在添加 `BatteryGroup` 时才枚举电池设备、重开设备句柄），限频 60 秒、最多 5 次；设置窗口/硬件信息窗口打开时也会请求一次，不用重启主程序 |
+| 单项异常隔离 | 每个监控项自己 try/catch，一项失败不再拖死其它项 |
+| 名称/类型**持久化** | `item_name`、`sensor_type` 写进 ini；旧配置启动时自动回填并写回。即使开机认不出传感器，界面上显示的也是「电池/电量/电池电量」而不是空白 |
+| 设置窗口**按下标对齐** | 列表不再跳过行，`GetSelectedItemInfo` 直接按下标取配置项，删除后重建列表 —— 删除/上移/下移不会再作用到别的项目 |
+| 只改真正变化的硬件开关 | 关闭设置窗口时逐项比较再赋值，避免「打开又关掉」就白重建一遍硬件组（每次重建都会重新枚举、重新打开设备句柄） |
+
+### 顺带：时间的单位增加「分钟 / 小时」
+
+`SensorType::TimeSpan`（电池的「剩余使用时间」）以前只有「秒」，现在可选 **秒 / 分钟 / 小时**，
+换算在 `GetSensorValue` 里做（`min = 秒 / 60`，`h = 秒 / 3600`），默认仍是秒，已有配置不受影响。
+在「插件设置」里选中该项，单位下拉框里就能切。
+
+### 怎么验证
+
+1. `HardwareMonitor.dll` 和 `zh-CN` 目录放进 `plugins`，重启 TrafficMonitor；
+2. 「插件设置」勾上电池，添加「电池 / 电量 / 电池电量」这类项目，确认任务栏显示正常；
+3. 拔掉/插上电源（充放电来回切）、合盖休眠再唤醒：数值应继续更新，不再卡住；
+4. 退出并重启主程序：电池项应该还在（配置里有这一项，插件就一定会交出来）；
+5. 万一开机时电池设备确实没枚举出来：界面先显示 `--`（而不是冻住的旧值），
+   通常 3~5 秒内自动重枚举后恢复；失败则每 60 秒重试，最多 5 次。
+
+### 回滚
+
+```powershell
+git checkout HardwareMonitor_V1.0.2 -- Plugins/HardwareMonitor
+```

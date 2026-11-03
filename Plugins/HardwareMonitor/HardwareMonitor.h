@@ -73,6 +73,7 @@ namespace HardwareMonitor
 
         bool m_config_backfilled{};                 //配置文件里有内容需要补写（名称、类型等）
         int m_battery_missing_count{};              //电池类监控项连续解析不到传感器的轮数
+        int m_battery_recover_attempts{};           //已经重新枚举过几次电池设备（读不到电池的次数太多时放弃）
         unsigned m_last_battery_recover{};          //上次重新枚举电池设备的时间（TickCount）
         volatile int m_battery_refresh_request{};   //是否请求在下一轮刷新时重新枚举电池设备（UI线程置位，数据刷新线程清零）
 
