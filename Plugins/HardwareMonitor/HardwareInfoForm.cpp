@@ -121,8 +121,7 @@ namespace HardwareMonitor
     void HardwareInfoForm::OnBatteryRefreshTimer(Object^ sender, EventArgs^ e)
     {
         batteryRefreshTimer->Stop();
-        batteryRefreshTimer->Dispose();
-        batteryRefreshTimer = nullptr;
+        delete batteryRefreshTimer;     //C++/CLI里对托管句柄用delete即调用Dispose，并把句柄置为nullptr
         //电池还是没有出现的话就保持原样，不要再重建了
         if (BatteryHardwareMissing())
             return;
@@ -323,8 +322,7 @@ namespace HardwareMonitor
         if (batteryRefreshTimer != nullptr)
         {
             batteryRefreshTimer->Stop();
-            batteryRefreshTimer->Dispose();
-            batteryRefreshTimer = nullptr;
+            delete batteryRefreshTimer;     //C++/CLI里对托管句柄用delete即调用Dispose，并把句柄置为nullptr
         }
         Common::SaveFormSize(this, L"hardware_info");
         Common::SaveTreeNodeExpandStatus(treeView1, MonitorGlobal::Instance()->treeCollapseNodes);

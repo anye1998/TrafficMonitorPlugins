@@ -80,7 +80,7 @@ namespace HardwareMonitor
         case SensorType::Data: unitList->Add("GB"); unitList->Add("MB"); break;
         case SensorType::SmallData: unitList->Add("MB"); unitList->Add("GB"); break;
         case SensorType::Throughput: unitList->Add("KB/s"); unitList->Add("MB/s"); break;
-        case SensorType::TimeSpan: unitList->Add("s"); break;
+        case SensorType::TimeSpan: unitList->Add("s"); unitList->Add("min"); unitList->Add("h"); break;   //时间：秒/分钟/小时（电池的“剩余使用时间”就用这个）
         case SensorType::Timing: unitList->Add("ns"); break;   //0.9.6 新增
         case SensorType::Energy: unitList->Add("mWh"); unitList->Add("Wh"); break;
         case SensorType::Noise: unitList->Add("dBA"); break;
@@ -319,6 +319,14 @@ namespace HardwareMonitor
                 value /= (1024.0f * 1024.0f);
             else                    //KB/s
                 value /= 1024.0f;
+        }
+        //时间（默认秒）
+        else if (sensor->SensorType == SensorType::TimeSpan)
+        {
+            if (unit->Equals("min"))        //分钟
+                value /= 60.0f;
+            else if (unit->Equals("h"))     //小时
+                value /= 3600.0f;
         }
         //电量
         else if (sensor->SensorType == SensorType::Energy)
