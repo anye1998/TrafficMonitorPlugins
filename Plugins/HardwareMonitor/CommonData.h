@@ -8,6 +8,8 @@ namespace HardwareMonitor
     struct ItemInfo
     {
         std::wstring identifyer;    //唯一标识符
+        std::wstring item_name;     //显示名称（保存在ini中：传感器暂时找不到时仍然能显示名称，避免监控项“消失”）
+        int sensor_type{ -1 };      //传感器类型（LibreHardwareMonitor::Hardware::SensorType），-1表示未知（同样会保存到ini中）
         int decimal_places{ 1 };         //小数位数
         bool specify_value_width{ true };  //指定数值宽度（不含小数和单位）
         int value_width{ 3 };       //数值宽度

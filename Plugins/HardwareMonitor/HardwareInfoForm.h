@@ -52,8 +52,13 @@ namespace HardwareMonitor {
         void OnFormClosing(Object^ sender, FormClosingEventArgs^ e);
 		void AddSelectedItem();
 		void EnableCtrl();
+        //根据当前的硬件树填充树控件
+        void BuildHardwareTree();
+        //重新枚举电池设备后，如果电池出现了就重建一次树
+        void OnBatteryRefreshTimer(Object^ sender, EventArgs^ e);
 
     private: System::Windows::Forms::TreeView^ treeView1;
+    private: System::Windows::Forms::Timer^ batteryRefreshTimer;
 
     private: System::ComponentModel::IContainer^ components;
     protected:

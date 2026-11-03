@@ -37,12 +37,15 @@ namespace HardwareMonitor {
 
     private:
         //用于保存列表中的每一项
+        //列表的行与m_settings.items_info中的配置项一一对应（索引相同），
+        //这样删除/上移/下移操作才能作用在正确的配置项上
         ref class ListItemInfo : public Object
         {
         public:
+            String^ identifier;         //监控项的identifier（与m_settings.items_info一一对应）
             String^ displayName;        //显示的名称
             String^ displayValue;       //显示的数值
-            LibreHardwareMonitor::Hardware::ISensor^ sensor;    //传感器对象
+            LibreHardwareMonitor::Hardware::ISensor^ sensor;    //传感器对象（可能为nullptr：传感器当前不存在）
             System::Drawing::Icon^ icon;    //列表项的图标
         };
 

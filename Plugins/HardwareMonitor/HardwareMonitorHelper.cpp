@@ -7,6 +7,7 @@
 using namespace LibreHardwareMonitor::Hardware;
 using namespace System::Collections::Generic;
 using namespace System;
+using namespace System::Text;
 
 namespace HardwareMonitor
 {
@@ -98,46 +99,171 @@ namespace HardwareMonitor
         return gcnew String("");
     }
 
-    //查找一个硬件下的传感器
-    //func为一个lambda表达式，原型为 bool(ISensor^)
-    template<class Func>
-    static ISensor^ FindSensorInHardware(IHardware^ hardware, Func func)
+    //把一个identifier归一化成“宽松匹配”用的键。
+    //LibreHardwareMonitor里有两处会导致同一个传感器算出不同的identifier：
+    //  1) 电池的功率/电流传感器会随状态改名：Charge Rate / Discharge Rate / Charge/Discharge Rate
+    //     （电流同理），而监控项的identifier是保存在配置文件里的，充电/放电一切换就对不上了；
+    //  2) 电池硬件的Identifier里带着BatteryTag（形如“battery/OEM_XXXX_1234”），
+    //     电池设备重新枚举后这个Tag可能会变。
+    //监控项的identifier不能跟着改：TrafficMonitor用“7KrUeFVl_”+identifier作为显示项ID，
+    //改了ID就等于换了一个显示项，用户已经配置好的显示项会消失。所以只能在查找时做宽松匹配。
+    static String^ GetLooseIdentifyer(String^ identifyer)
     {
-        //遍历传感器
+        if (String::IsNullOrEmpty(identifyer))
+            return nullptr;
+        array<String^>^ parts = identifyer->Split(gcnew array<wchar_t>{L'/'});
+        int n = parts->Length;
+        if (n < 3)
+            return identifyer->ToLowerInvariant();
+
+        //最后一段是传感器名称：把随充电/放电状态变化的名称归一
+        String^ sensor_name = parts[n - 1];
+        if (sensor_name->Equals("Charge Rate", StringComparison::OrdinalIgnoreCase)
+            || sensor_name->Equals("Discharge Rate", StringComparison::OrdinalIgnoreCase)
+            || sensor_name->Equals("Charge/Discharge Rate", StringComparison::OrdinalIgnoreCase))
+            sensor_name = "ChargeDischargeRate";
+        else if (sensor_name->Equals("Charge Current", StringComparison::OrdinalIgnoreCase)
+            || sensor_name->Equals("Discharge Current", StringComparison::OrdinalIgnoreCase)
+            || sensor_name->Equals("Charge/Discharge Current", StringComparison::OrdinalIgnoreCase))
+            sensor_name = "ChargeDischargeCurrent";
+
+        StringBuilder^ sb = gcnew StringBuilder();
+        for (int i = 0; i < n - 2; i++)
+        {
+            String^ seg = parts[i]->ToLowerInvariant();
+            //电池硬件段的末尾是BatteryTag，去掉结尾的“_数字”
+            if (i > 0 && parts[i - 1]->Equals("battery", StringComparison::OrdinalIgnoreCase))
+            {
+                int pos = seg->LastIndexOf('_');
+                if (pos > 0)
+                {
+                    String^ tail = seg->Substring(pos + 1);
+                    bool all_digit = tail->Length > 0;
+                    for each (System::Char ch in tail)
+                    {
+                        if (!Char::IsDigit(ch))
+                        {
+                            all_digit = false;
+                            break;
+                        }
+                    }
+                    if (all_digit)
+                        seg = seg->Substring(0, pos);
+                }
+            }
+            sb->Append(seg)->Append('/');
+        }
+        sb->Append(parts[n - 2]->ToLowerInvariant())->Append('/')->Append(sensor_name->ToLowerInvariant());
+        return sb->ToString();
+    }
+
+    //宽松匹配键在索引里的前缀，避免和真实的identifier冲突
+    static String^ GetLooseIndexKey(String^ identifyer)
+    {
+        String^ loose = GetLooseIdentifyer(identifyer);
+        if (loose == nullptr)
+            return nullptr;
+        return String::Concat("\u0001", loose);
+    }
+
+    //把一个硬件（连同它的子硬件）下的所有传感器加入索引
+    static void AddHardwareSensorsToIndex(IHardware^ hardware, Dictionary<String^, ISensor^>^ map)
+    {
+        //注意：只加入到索引里的sensor是hardware->Sensors里的传感器，也就是当前处于“激活”状态的传感器。
+        //被LibreHardwareMonitor停用（例如电池设备暂时读不到数据）的传感器不会出现在hardware->Sensors里，
+        //这样索引重建后自然就查不到它，调用方会显示“--”，而不是继续显示过期的旧数值。
         for each (ISensor ^ sensor in hardware->Sensors)
         {
-            if (func(sensor))
-                return sensor;
+            String^ identifyer = HardwareMonitorHelper::GetSensorIdentifyer(sensor);
+            if (String::IsNullOrEmpty(identifyer))
+                continue;
+            if (!map->ContainsKey(identifyer))
+                map->Add(identifyer, sensor);
+            String^ loose_key = GetLooseIndexKey(identifyer);
+            if (loose_key != nullptr && !map->ContainsKey(loose_key))
+                map->Add(loose_key, sensor);
         }
-        //遍历子硬件
         for each (IHardware ^ sub_hardware in hardware->SubHardware)
         {
-            ISensor^ sensor = FindSensorInHardware(sub_hardware, func);
-            if (sensor != nullptr)
-                return sensor;
+            AddHardwareSensorsToIndex(sub_hardware, map);
         }
-        return nullptr;
+    }
 
+    void HardwareMonitorHelper::RebuildSensorIndex()
+    {
+        MonitorGlobal^ global = MonitorGlobal::Instance();
+        if (global->computer == nullptr)
+            return;
+        //先建一个新的Dictionary，建好之后再整体替换，这样其它线程（例如设置窗口的UI线程）
+        //在重建过程中读到的仍然是上一次的完整索引，不会读到一半的数据。
+        Dictionary<String^, ISensor^>^ map = gcnew Dictionary<String^, ISensor^>();
+        try
+        {
+            for each (IHardware ^ hardware in global->computer->Hardware)
+            {
+                AddHardwareSensorsToIndex(hardware, map);
+            }
+        }
+        catch (System::Exception^)
+        {
+            //遍历过程中硬件树被修改（例如正在重新枚举电池设备），保留上一次的索引，下次再重建
+            global->sensor_index_dirty = true;
+            return;
+        }
+        global->sensorMap = map;
+        global->sensor_index_dirty = false;
+    }
+
+    void HardwareMonitorHelper::InvalidateSensorIndex()
+    {
+        MonitorGlobal::Instance()->sensor_index_dirty = true;
     }
 
     ISensor^ HardwareMonitorHelper::FindSensorByIdentifyer(String^ identifyer)
     {
-        ISensor^ sensor;
-        if (!MonitorGlobal::Instance()->sensorMap->TryGetValue(identifyer, sensor))
-        {
-            auto computer = MonitorGlobal::Instance()->computer;
-            gcroot<String^> _identifyer = identifyer;       //使用gcroot包装托管类指针，以便被lambda捕获
-            for each (IHardware^ hardware in computer->Hardware)
-            {
-                sensor = FindSensorInHardware(hardware, [&](ISensor^ _sensor) {
-                    return GetSensorIdentifyer(_sensor) == _identifyer;
-                });
-                if (sensor != nullptr)
-                    break;
-            }
-            MonitorGlobal::Instance()->sensorMap->Add(identifyer, sensor);
-        }
-        return sensor;
+        if (String::IsNullOrEmpty(identifyer))
+            return nullptr;
+        MonitorGlobal^ global = MonitorGlobal::Instance();
+        if (global->sensor_index_dirty)
+            RebuildSensorIndex();
+        ISensor^ sensor = nullptr;
+        if (global->sensorMap->TryGetValue(identifyer, sensor))
+            return sensor;
+        //精确匹配失败时再按“宽松匹配”找一次：充电/放电切换导致传感器改名、
+        //电池设备重新枚举导致BatteryTag变化，都会让原来的identifier对不上
+        String^ loose_key = GetLooseIndexKey(identifyer);
+        if (loose_key != nullptr && global->sensorMap->TryGetValue(loose_key, sensor))
+            return sensor;
+        //这里不再把“找不到”的结果写回索引。以前的做法会把nullptr缓存下来，
+        //导致开机时电池设备还没枚举出来的情况下一整轮运行都找不到电池传感器。
+        return nullptr;
+    }
+
+    bool HardwareMonitorHelper::IsBatteryIdentifyer(String^ identifyer)
+    {
+        if (String::IsNullOrEmpty(identifyer))
+            return false;
+        //电池硬件的Identifier形如“battery/OEM_XXXX_1234”，完整的监控项identifier为
+        //“battery/OEM_XXXX_1234/Level/Charge Level”
+        return identifyer->IndexOf("battery/", StringComparison::OrdinalIgnoreCase) >= 0;
+    }
+
+    String^ HardwareMonitorHelper::GetHardwareIconResNameFromIdentifyer(String^ identifyer)
+    {
+        if (String::IsNullOrEmpty(identifyer))
+            return L"";
+        String^ id = identifyer->ToLowerInvariant();
+        if (IsBatteryIdentifyer(identifyer)) return L"batteries";
+        if (id->StartsWith("cpu/")) return L"CPU";
+        if (id->Contains("gpu-nvidia")) return L"Nvidia";
+        if (id->Contains("gpu-amd")) return L"AMD";
+        if (id->Contains("gpu-intel")) return L"intel";
+        if (id->StartsWith("motherboard/") || id->StartsWith("smbios/") || id->Contains("/lpc/")) return L"MotherBoard";
+        if (id->StartsWith("storage/") || id->StartsWith("nvme/")) return L"Storage";
+        if (id->StartsWith("network/")) return L"Network";
+        if (id->StartsWith("memory/")) return L"RAM";
+        if (id->Contains("/ec/") || id->Contains("/cooler/")) return L"FanColtroller";
+        return L"";
     }
 
     float HardwareMonitorHelper::GetSensorValue(LibreHardwareMonitor::Hardware::ISensor^ sensor, System::String^ unit)

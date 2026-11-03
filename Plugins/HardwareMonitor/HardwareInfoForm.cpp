@@ -8,6 +8,20 @@ using namespace System::Collections::Generic;
 
 namespace HardwareMonitor
 {
+    //硬件树里是否缺少电池（开启了电池监控，但是LibreHardwareMonitor却没有枚举出电池硬件）
+    static bool BatteryHardwareMissing()
+    {
+        Computer^ computer = MonitorGlobal::Instance()->computer;
+        if (computer == nullptr || !computer->IsBatteryEnabled)
+            return false;
+        for each (IHardware ^ hardware in computer->Hardware)
+        {
+            if (hardware->HardwareType == HardwareType::Battery)
+                return false;
+        }
+        return true;
+    }
+
     static TreeNode^ AddHardwareNode(TreeNodeCollection^ nodes, IHardware^ hardware)
     {
         auto hardware_node = nodes->Add(Common::GetTranslatedString(hardware->Name));
@@ -32,8 +46,15 @@ namespace HardwareMonitor
             //保存传感器节点的信息到Tag
             HardwareInfoForm::SensorNodeInfo^ nodeInfo = gcnew HardwareInfoForm::SensorNodeInfo();
             nodeInfo->displayName = sensor_str;
-            String^ defaultUnit = HardwareMonitorHelper::GetSensorTypeDefaultUnit(sensor->SensorType);
-            nodeInfo->displayValue = HardwareMonitorHelper::GetSensorValueText(sensor, defaultUnit);
+            try
+            {
+                String^ defaultUnit = HardwareMonitorHelper::GetSensorTypeDefaultUnit(sensor->SensorType);
+                nodeInfo->displayValue = HardwareMonitorHelper::GetSensorValueText(sensor, defaultUnit);
+            }
+            catch (System::Exception^)
+            {
+                nodeInfo->displayValue = L"--";
+            }
             nodeInfo->sensor = sensor;
             sensor_node->Tag = nodeInfo;
         }
@@ -53,6 +74,27 @@ namespace HardwareMonitor
         Common::SetButtonIcon(addSelectedBtn, "Add");
 
         //填充数据
+        BuildHardwareTree();
+
+        //开启了电池监控、但是硬件树里没有电池（开机时电池设备还没枚举出来，或者休眠后
+        //电池句柄失效）时，请数据刷新线程重新枚举一次电池设备，1.5秒后如果电池出现了就重建树，
+        //这样用户在这里就能直接看到电池的传感器，而不必重启主程序
+        if (BatteryHardwareMissing())
+        {
+            CHardwareMonitor::GetInstance()->RequestBatteryGroupRefresh();
+            batteryRefreshTimer = gcnew System::Windows::Forms::Timer();
+            batteryRefreshTimer->Interval = 1500;
+            batteryRefreshTimer->Tick += gcnew EventHandler(this, &HardwareInfoForm::OnBatteryRefreshTimer);
+            batteryRefreshTimer->Start();
+        }
+
+        EnableCtrl();
+    }
+
+    void HardwareInfoForm::BuildHardwareTree()
+    {
+        treeView1->BeginUpdate();
+        treeView1->Nodes->Clear();
         auto computer = MonitorGlobal::Instance()->computer;
         for (int i = 0; i < computer->Hardware->Count; i++)
         {
@@ -73,7 +115,18 @@ namespace HardwareMonitor
         else
             //恢复节点的展开状态
             Common::RestoreTreeNodeExpandStatus(treeView1, MonitorGlobal::Instance()->treeCollapseNodes);
+        treeView1->EndUpdate();
+    }
 
+    void HardwareInfoForm::OnBatteryRefreshTimer(Object^ sender, EventArgs^ e)
+    {
+        batteryRefreshTimer->Stop();
+        batteryRefreshTimer->Dispose();
+        batteryRefreshTimer = nullptr;
+        //电池还是没有出现的话就保持原样，不要再重建了
+        if (BatteryHardwareMissing())
+            return;
+        BuildHardwareTree();
         EnableCtrl();
     }
 
@@ -94,9 +147,17 @@ namespace HardwareMonitor
             HardwareInfoForm::SensorNodeInfo^ sensorInfo = dynamic_cast<HardwareInfoForm::SensorNodeInfo^>(node->Tag);
             if (sensorInfo != nullptr && sensorInfo->sensor != nullptr)
             {
-                sensorInfo->displayName = Common::GetTranslatedString(sensorInfo->sensor->Name);
-                String^ defaultUnit = HardwareMonitorHelper::GetSensorTypeDefaultUnit(sensorInfo->sensor->SensorType);
-                sensorInfo->displayValue = HardwareMonitorHelper::GetSensorValueText(sensorInfo->sensor, defaultUnit);
+                //单个节点取值失败不能影响其它节点（传感器有可能已经被停用或失效）
+                try
+                {
+                    sensorInfo->displayName = Common::GetTranslatedString(sensorInfo->sensor->Name);
+                    String^ defaultUnit = HardwareMonitorHelper::GetSensorTypeDefaultUnit(sensorInfo->sensor->SensorType);
+                    sensorInfo->displayValue = HardwareMonitorHelper::GetSensorValueText(sensorInfo->sensor, defaultUnit);
+                }
+                catch (System::Exception^)
+                {
+                    sensorInfo->displayValue = L"--";
+                }
             }
         }
     }
@@ -258,6 +319,13 @@ namespace HardwareMonitor
 
     void HardwareInfoForm::OnFormClosing(Object^ sender, FormClosingEventArgs^ e)
     {
+        //窗口关闭时把定时器停掉，避免它继续回调到已经关闭的窗口
+        if (batteryRefreshTimer != nullptr)
+        {
+            batteryRefreshTimer->Stop();
+            batteryRefreshTimer->Dispose();
+            batteryRefreshTimer = nullptr;
+        }
         Common::SaveFormSize(this, L"hardware_info");
         Common::SaveTreeNodeExpandStatus(treeView1, MonitorGlobal::Instance()->treeCollapseNodes);
         CHardwareMonitor::GetInstance()->SaveConfig();

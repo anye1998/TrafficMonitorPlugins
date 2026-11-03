@@ -37,6 +37,22 @@ namespace HardwareMonitor
         controllerCheck->Checked = computer->IsControllerEnabled;
         psuCheck->Checked = computer->IsPsuEnabled;
 
+        //打开了电池监控、但当前又有电池监控项读不到传感器时（开机时电池设备还没枚举出来，
+        //或者休眠/驱动重载后电池句柄失效），请数据刷新线程重新枚举一次电池设备，
+        //这样用户打开设置窗口就能看到数值恢复，而不是必须重启主程序
+        if (batteryCheck->Checked)
+        {
+            for (const auto& item : CHardwareMonitor::GetInstance()->m_settings.items_info)
+            {
+                String^ identifyer = gcnew String(item.identifyer.c_str());
+                if (HardwareMonitorHelper::IsBatteryIdentifyer(identifyer) && HardwareMonitorHelper::FindSensorByIdentifyer(identifyer) == nullptr)
+                {
+                    CHardwareMonitor::GetInstance()->RequestBatteryGroupRefresh();
+                    break;
+                }
+            }
+        }
+
         showTooltipCheck->Checked = CHardwareMonitor::GetInstance()->m_settings.show_mouse_tooltip;
 
         decimalPlaceCombo->DropDownStyle = ComboBoxStyle::DropDownList;
@@ -65,13 +81,28 @@ namespace HardwareMonitor
         for each (const auto & obj in monitorItemListBox->Items)
         {
             ListItemInfo^ listItem = dynamic_cast<ListItemInfo^>(obj);
-            if (listItem != nullptr && listItem->sensor != nullptr)
+            if (listItem == nullptr)
+                continue;
+            //每一轮都按identifier重新解析一次传感器。传感器可能这一轮失效、下一轮又回来
+            //（电池设备被重新枚举后就是这种情况），所以不能一直使用打开窗口时缓存的那个对象，
+            //否则对象失效之后这里的数值就再也不会更新了。
+            ISensor^ sensor = HardwareMonitorHelper::FindSensorByIdentifyer(listItem->identifier);
+            listItem->sensor = sensor;
+            if (sensor == nullptr)
             {
-                String^ identifyer = HardwareMonitorHelper::GetSensorIdentifyer(listItem->sensor);
-                ItemInfo& itemInfo = CHardwareMonitor::GetInstance()->m_settings.FindItemInfo(Common::StringToStdWstring(identifyer));
-                //获取displayValue
-                listItem->displayValue = HardwareMonitorHelper::GetSensorValueText(listItem->sensor, gcnew String(itemInfo.unit.c_str()), itemInfo.decimal_places, itemInfo.show_unit);
+                listItem->displayValue = L"--";
+                continue;
             }
+            std::wstring identifier_str = Common::StringToStdWstring(listItem->identifier);
+            //注意这里要用列表项自己保存的identifier去查配置：传感器当前的identifier可能和保存的
+            //不完全一样（电池的充放电会改名），而单位、小数位数是按保存的identifier存的
+            ItemInfo& itemInfo = CHardwareMonitor::GetInstance()->m_settings.FindItemInfo(identifier_str);
+            //名称也可能刚刚才从传感器上取到，这里同步一下
+            String^ item_name = gcnew String(CHardwareMonitor::GetInstance()->GetItemName(identifier_str).c_str());
+            if (!String::IsNullOrEmpty(item_name))
+                listItem->displayName = item_name;
+            //获取displayValue
+            listItem->displayValue = HardwareMonitorHelper::GetSensorValueText(sensor, gcnew String(itemInfo.unit.c_str()), itemInfo.decimal_places, itemInfo.show_unit);
         }
         monitorItemListBox->Invalidate();
     }
@@ -83,31 +114,43 @@ namespace HardwareMonitor
         EnableControls();
 
         //填充数据
-        for (const auto& item : CHardwareMonitor::GetInstance()->m_settings.items_info)
+        //注意：必须为items_info中的每一项都添加一行，即使它对应的传感器当前找不到。
+        //列表行与items_info是按下标一一对应的，一旦跳过某些行，下标就错位了：
+        //删除/上移/下移会作用到别的监控项上（把电池项目删掉就是这么来的），
+        //而“电池监控的项目没有了”也正是因为传感器找不到时这一行被跳过。
+        const auto& items_info{ CHardwareMonitor::GetInstance()->m_settings.items_info };
+        for (size_t i = 0; i < items_info.size(); i++)
         {
-            String^ item_name = gcnew String(CHardwareMonitor::GetInstance()->GetItemName(item.identifyer).c_str());
-            if (item_name->Length > 0)
+            const ItemInfo& item = items_info[i];
+            ListItemInfo^ listItem = gcnew ListItemInfo();
+            listItem->identifier = gcnew String(item.identifyer.c_str());
+            listItem->displayName = gcnew String(CHardwareMonitor::GetInstance()->GetItemName(item.identifyer).c_str());
+            ISensor^ sensor = HardwareMonitorHelper::FindSensorByIdentifyer(listItem->identifier);
+            listItem->sensor = sensor;
+            if (sensor != nullptr)
             {
-                ListItemInfo^ listItem = gcnew ListItemInfo();
-                listItem->displayName = item_name;
-                ISensor^ sensor = HardwareMonitorHelper::FindSensorByIdentifyer(gcnew String(item.identifyer.c_str()));
-                listItem->sensor = sensor;
-                if (sensor != nullptr)
-                {
-                    //获取数值文本
-                    listItem->displayValue = HardwareMonitorHelper::GetSensorValueText(sensor, gcnew String(item.unit.c_str()), item.decimal_places, item.show_unit);
-                    //根据监控项类型获取图标
-                    IHardware^ hardware = sensor->Hardware;
-                    //如果是子硬件，则使用它的父硬件
-                    if (hardware->Parent != nullptr)
-                        hardware = hardware->Parent;
-                    auto resName = HardwareMonitorHelper::GetHardwareIconResName(hardware->HardwareType);
-                    if (resName->Length > 0)
-                        listItem->icon = MonitorGlobal::Instance()->GetIcon(resName);
-                    monitorItemListBox->Items->Add(listItem);
-                }
+                //获取数值文本
+                listItem->displayValue = HardwareMonitorHelper::GetSensorValueText(sensor, gcnew String(item.unit.c_str()), item.decimal_places, item.show_unit);
+                //根据监控项类型获取图标
+                IHardware^ hardware = sensor->Hardware;
+                //如果是子硬件，则使用它的父硬件
+                if (hardware->Parent != nullptr)
+                    hardware = hardware->Parent;
+                auto resName = HardwareMonitorHelper::GetHardwareIconResName(hardware->HardwareType);
+                if (resName->Length > 0)
+                    listItem->icon = MonitorGlobal::Instance()->GetIcon(resName);
             }
+            else
+            {
+                //传感器当前不存在：显示“--”，图标按identifier推断，但监控项本身必须保留
+                listItem->displayValue = L"--";
+                String^ resName = HardwareMonitorHelper::GetHardwareIconResNameFromIdentifyer(listItem->identifier);
+                if (resName->Length > 0)
+                    listItem->icon = MonitorGlobal::Instance()->GetIcon(resName);
+            }
+            monitorItemListBox->Items->Add(listItem);
         }
+        EnableControls();
     }
 
     bool SettingsForm::IsSelectionValid()
@@ -117,16 +160,12 @@ namespace HardwareMonitor
 
     ItemInfo& SettingsForm::GetSelectedItemInfo()
     {
+        //列表行与items_info按下标一一对应，直接按下标取即可。
+        //以前是按“列表里显示的传感器”反查配置项，传感器找不到的行被跳过之后就会取到错误的配置项。
         int index = monitorItemListBox->SelectedIndex;
-        if (index >= 0 && index < monitorItemListBox->Items->Count)
-        {
-            ListItemInfo^ listItem = dynamic_cast<ListItemInfo^>(monitorItemListBox->Items[index]);
-            if (listItem != nullptr && listItem->sensor != nullptr)
-            {
-                String^ identifyer = HardwareMonitorHelper::GetSensorIdentifyer(listItem->sensor);
-                return CHardwareMonitor::GetInstance()->m_settings.FindItemInfo(Common::StringToStdWstring(identifyer));
-            }
-        }
+        auto& items_info{ CHardwareMonitor::GetInstance()->m_settings.items_info };
+        if (index >= 0 && index < static_cast<int>(items_info.size()))
+            return items_info[index];
         static ItemInfo emptyInfo;
         return emptyInfo;
     }
@@ -205,19 +244,23 @@ namespace HardwareMonitor
 
     void SettingsForm::OnFormClosing(Object^ sender, FormClosingEventArgs^ e)
     {
-        //更新要监控的硬件设置
+        //更新要监控的硬件设置。
+        //只给真正变化过的选项赋值：LibreHardwareMonitor的属性setter每改一次都会把
+        //对应的硬件组整个移除再重新创建一次（电池组会重新枚举电池设备、重新打开句柄），
+        //全部无脑赋值一遍会在用户打开又关闭设置窗口时白折腾一遍硬件。
         Computer^ computer = MonitorGlobal::Instance()->computer;
+        bool hardware_changed = false;
         try
         {
-            computer->IsCpuEnabled = cpuCheck->Checked;
-            computer->IsGpuEnabled = gpuCheck->Checked;
-            computer->IsMotherboardEnabled = motherBoardCheck->Checked;
-            computer->IsStorageEnabled = storageCheck->Checked;
-            computer->IsBatteryEnabled = batteryCheck->Checked;
-            computer->IsNetworkEnabled = networkCheck->Checked;
-            computer->IsMemoryEnabled = memoryCheck->Checked;
-            computer->IsControllerEnabled = controllerCheck->Checked;
-            computer->IsPsuEnabled = psuCheck->Checked;
+            if (computer->IsCpuEnabled != cpuCheck->Checked) { computer->IsCpuEnabled = cpuCheck->Checked; hardware_changed = true; }
+            if (computer->IsGpuEnabled != gpuCheck->Checked) { computer->IsGpuEnabled = gpuCheck->Checked; hardware_changed = true; }
+            if (computer->IsMotherboardEnabled != motherBoardCheck->Checked) { computer->IsMotherboardEnabled = motherBoardCheck->Checked; hardware_changed = true; }
+            if (computer->IsStorageEnabled != storageCheck->Checked) { computer->IsStorageEnabled = storageCheck->Checked; hardware_changed = true; }
+            if (computer->IsBatteryEnabled != batteryCheck->Checked) { computer->IsBatteryEnabled = batteryCheck->Checked; hardware_changed = true; }
+            if (computer->IsNetworkEnabled != networkCheck->Checked) { computer->IsNetworkEnabled = networkCheck->Checked; hardware_changed = true; }
+            if (computer->IsMemoryEnabled != memoryCheck->Checked) { computer->IsMemoryEnabled = memoryCheck->Checked; hardware_changed = true; }
+            if (computer->IsControllerEnabled != controllerCheck->Checked) { computer->IsControllerEnabled = controllerCheck->Checked; hardware_changed = true; }
+            if (computer->IsPsuEnabled != psuCheck->Checked) { computer->IsPsuEnabled = psuCheck->Checked; hardware_changed = true; }
         }
         catch(System::Exception^)
         {}
@@ -228,8 +271,9 @@ namespace HardwareMonitor
         CHardwareMonitor::GetInstance()->SaveConfig();
         Common::SaveFormSize(this, L"settings");
 
-        //更改了监控的硬件设置后，传感器可能会发生变化，因此这里清空传感器缓存
-        MonitorGlobal::Instance()->sensorMap->Clear();
+        //更改了监控的硬件设置后，传感器可能会发生变化，因此这里让传感器索引失效，下一轮刷新时重建
+        if (hardware_changed)
+            HardwareMonitorHelper::InvalidateSensorIndex();
     }
 
     void SettingsForm::ListBox_DrawItem(Object^ sender, DrawItemEventArgs^ e)
@@ -308,8 +352,10 @@ namespace HardwareMonitor
             // 如果用户点击“确定”，则删除选中项
             if (result == System::Windows::Forms::DialogResult::OK)
             {
-                monitorItemListBox->Items->RemoveAt(selectedIndex);
                 CHardwareMonitor::GetInstance()->RemoveDisplayItem(selectedIndex);
+                //重新生成列表：列表行与配置项是按下标对应的，删除后必须重建，
+                //否则后面所有行都会指向错误的配置项
+                UpdateItemList();
             }
         }
     }

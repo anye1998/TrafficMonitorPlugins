@@ -18,7 +18,16 @@ namespace HardwareMonitor
         //根据传感器类型获取数据的默认单位
         static System::String^ GetSensorTypeDefaultUnit(LibreHardwareMonitor::Hardware::SensorType type);
 
-        //根据一个传感器的唯一标识符查找一个传感器
+        //重建传感器索引：遍历当前硬件树，重新建立“identifier → 传感器对象”的映射。
+        //每次硬件数据更新后都要调用一次，保证索引里保存的传感器都是当前有效的对象。
+        //（以前的做法是把查找结果（包括“找不到”）永久缓存在sensorMap里，一旦开机时
+        // 硬件还没枚举出来，这个监控项就再也找不到传感器了。）
+        static void RebuildSensorIndex();
+
+        //让传感器索引失效，下次查找时自动重建
+        static void InvalidateSensorIndex();
+
+        //根据一个传感器的唯一标识符查找一个传感器（找不到返回nullptr，不会缓存“找不到”的结果）
         static LibreHardwareMonitor::Hardware::ISensor^ FindSensorByIdentifyer(System::String^ identifyer);
 
         //根据指定单位，获取一个传感器数值
@@ -33,8 +42,13 @@ namespace HardwareMonitor
         //获取一个传感器的唯一标识符
         static System::String^ GetSensorIdentifyer(LibreHardwareMonitor::Hardware::ISensor^ sensor);
 
+        //判断一个监控项的identifier是否属于电池
+        static bool IsBatteryIdentifyer(System::String^ identifyer);
+
+        //根据identifier推断硬件图标的资源名称（传感器找不到时，设置窗口里仍然能显示正确的图标）
+        static System::String^ GetHardwareIconResNameFromIdentifyer(System::String^ identifyer);
+
         //获取默认的监控项目
         static void GetDefaultMonitorItem(System::Collections::Generic::List<LibreHardwareMonitor::Hardware::ISensor^>^ default_sensors);
     };
 }
-
